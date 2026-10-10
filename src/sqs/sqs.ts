@@ -1,5 +1,6 @@
 import {
   CreateQueueCommand,
+  GetQueueUrlCommand,
   GetQueueAttributesCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
@@ -58,7 +59,11 @@ async function createFifoQueue(
 }
 
 /** Cria (ou reaproveita) as três filas FIFO e liga a fila principal à DLQ. */
-export async function ensureQueues(client: SQSClient, prefix = ''): Promise<QueueUrls> {
+export async function ensureQueues(
+  client: SQSClient,
+  prefix = '',
+  maxReceiveCount = MAX_RECEIVE_COUNT,
+): Promise<QueueUrls> {
   const wagerTransactionsDlq = await createFifoQueue(client, prefix + QUEUE_NAMES.wagerTransactionsDlq);
   const dlqAttributes = await client.send(
     new GetQueueAttributesCommand({ QueueUrl: wagerTransactionsDlq, AttributeNames: ['QueueArn'] }),
@@ -69,9 +74,23 @@ export async function ensureQueues(client: SQSClient, prefix = ''): Promise<Queu
   }
 
   const wagerTransactions = await createFifoQueue(client, prefix + QUEUE_NAMES.wagerTransactions, {
-    RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlqArn, maxReceiveCount: MAX_RECEIVE_COUNT }),
+    RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlqArn, maxReceiveCount }),
   });
   const walletEvents = await createFifoQueue(client, prefix + QUEUE_NAMES.walletEvents);
 
   return { wagerTransactions, wagerTransactionsDlq, walletEvents };
+}
+
+/** Resolve as URLs das filas já existentes (criadas pelo sqs-init ou por `ensureQueues`). */
+export async function resolveQueueUrls(client: SQSClient, prefix = ''): Promise<QueueUrls> {
+  const url = async (name: string) => {
+    const { QueueUrl } = await client.send(new GetQueueUrlCommand({ QueueName: prefix + name }));
+    if (!QueueUrl) throw new Error(`Queue ${prefix + name} not found`);
+    return QueueUrl;
+  };
+  return {
+    wagerTransactions: await url(QUEUE_NAMES.wagerTransactions),
+    wagerTransactionsDlq: await url(QUEUE_NAMES.wagerTransactionsDlq),
+    walletEvents: await url(QUEUE_NAMES.walletEvents),
+  };
 }

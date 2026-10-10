@@ -5,6 +5,8 @@ import { APP_CONFIG, type AppConfig } from './config';
 import { createOrmConfig } from './database/mikro-orm.config';
 import { HealthController } from './health/health.controller';
 import { HttpExceptionFilter } from './http-exception.filter';
+import { OutboxPublisher } from './messaging/outbox-publisher';
+import { WagerTransactionConsumer } from './messaging/wager-transaction.consumer';
 import { Metrics } from './metrics/metrics';
 import { MetricsController } from './metrics/metrics.controller';
 import { createSqsClient, SQS_CLIENT } from './sqs/sqs';
@@ -36,6 +38,8 @@ export class AppModule {
         Metrics,
         ProcessWagerTransaction,
         PendingReferenceWorker,
+        WagerTransactionConsumer,
+        OutboxPublisher,
         CreateWallet,
         ReconciliationService,
         WalletQueries,
