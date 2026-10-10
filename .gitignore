@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+temp/
+
+# Variáveis de ambiente: só os exemplos/defaults locais são versionados
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Logs
+logs/
+*.log
+
+# Configuração local do editor/assistente (não versionada)
+.claude/settings.local.json
+
+# Material de apoio local (não publicado): enunciado e documentos de processo
+DocumentaçãoTeste/
+CLAUDE.md
+docs/PLANO.md
+docs/relatorios/
