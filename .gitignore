@@ -12,12 +12,3 @@ temp/
 # Logs
 logs/
 *.log
-
-# Configuração local do editor/assistente (não versionada)
-.claude/settings.local.json
-
-# Material de apoio local (não publicado): enunciado e documentos de processo
-DocumentaçãoTeste/
-CLAUDE.md
-docs/PLANO.md
-docs/relatorios/
