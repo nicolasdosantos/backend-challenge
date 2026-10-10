@@ -9,9 +9,10 @@ import { openWallet, wagerCommand } from '../support/wagering';
 /**
  * Banco "pausado": o app fala com o PostgreSQL através de um proxy TCP que, em pausa, descarta
  * todos os bytes (mesmo efeito de `docker compose pause postgres`, que não está disponível
- * dentro do container de testes). Com query_timeout curto, a requisição falha em vez de travar.
+ * dentro do container de testes). Com timeouts curtos, a requisição falha em vez de travar.
  */
-const QUERY_TIMEOUT_MS = 1500;
+const TIMEOUT_MS = 1500;
+const POOL_MAX = 4;
 let proxy: TcpProxy;
 let t: TestApp;
 const touched: string[] = [];
@@ -23,15 +24,17 @@ beforeAll(async () => {
   const viaProxy = new URL(target);
   viaProxy.hostname = '127.0.0.1';
   viaProxy.port = String(proxy.port);
-  t = await createTestApp({ databaseUrl: viaProxy.toString(), dbQueryTimeoutMs: QUERY_TIMEOUT_MS });
+  t = await createTestApp({
+    databaseUrl: viaProxy.toString(),
+    dbQueryTimeoutMs: TIMEOUT_MS,
+    dbConnectTimeoutMs: TIMEOUT_MS,
+    dbPoolMax: POOL_MAX,
+  });
 });
 
 afterAll(async () => {
   await expectLedgerConsistent(t.orm, touched);
-  // BUG CONHECIDO (kysely 0.29.6, usado pelo MikroORM 7): quando o BEGIN falha por timeout, a conexão
-  // nunca volta ao pool, e o pool.end() do close() espera por ela para sempre. Prazo limitado aqui
-  // para não esconder o restante da suíte; ver ARCHITECTURE.md §11 (Problemas conhecidos).
-  await Promise.race([t.close(), Bun.sleep(2000)]);
+  await t.close(); // sem conexões presas, o pool fecha normalmente
   proxy.stop();
 });
 
@@ -41,6 +44,12 @@ async function waitUntilReady() {
     await Bun.sleep(100);
   }
   throw new Error('app did not become ready again');
+}
+
+/** Conexões emprestadas pelo pool do `pg` (total − ociosas). */
+async function checkedOutConnections(): Promise<number> {
+  const pool = (await t.orm.em.getConnection().getNativeClient()) as { totalCount: number; idleCount: number };
+  return pool.totalCount - pool.idleCount;
 }
 
 describe('PostgreSQL indisponível', () => {
@@ -75,6 +84,28 @@ describe('PostgreSQL indisponível', () => {
     expect(t.logger.entries.some((e) => e.level === 'error' && JSON.stringify(e.message).includes('SERVICE_UNAVAILABLE'))).toBe(true);
   }, 30_000);
 
-  // Pendente de decisão (patch no kysely): hoje 1 conexão fica presa a cada BEGIN que falha.
-  test.todo('a conexão volta ao pool quando o BEGIN da transação falha por indisponibilidade do banco', () => {});
+  test('mais falhas de BEGIN do que o tamanho do pool: as conexões voltam e a instância responde 200 sem reiniciar', async () => {
+    const w = await openWallet(t, '100.00');
+    touched.push(w.id);
+    const failures = POOL_MAX + 2;
+
+    proxy.pause();
+    try {
+      for (let i = 0; i < failures; i++) {
+        const response = await submitTransaction(t.baseUrl, wagerCommand(w, { money: { amount: '1.00', currency: 'BRL' } }));
+        expect(response.status).toBe(503);
+      }
+    } finally {
+      proxy.resume();
+    }
+
+    // Sem o patch do kysely, cada BEGIN que falha prende 1 conexão: o pool (4) estaria esgotado
+    // e toda requisição seguinte esperaria uma conexão livre até dar 503, para sempre.
+    await waitUntilReady();
+    expect(await checkedOutConnections()).toBe(0);
+    const afterOutage = await submitTransaction(t.baseUrl, wagerCommand(w, { money: { amount: '1.00', currency: 'BRL' } }));
+    expect(afterOutage.status).toBe(200);
+    expect(afterOutage.body.balance).toEqual({ amount: '99.00', currency: 'BRL' });
+    expect(await checkedOutConnections()).toBe(0);
+  }, 60_000);
 });
