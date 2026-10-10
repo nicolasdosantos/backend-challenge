@@ -47,6 +47,8 @@ export interface TestAppOptions {
   dbPoolMax?: number;
   dbConnectTimeoutMs?: number;
   pendingReference?: Partial<AppConfig['pendingReference']>;
+  consumer?: Partial<AppConfig['consumer']>;
+  outbox?: Partial<AppConfig['outbox']>;
 }
 
 export async function createTestApp(options: TestAppOptions = {}): Promise<TestApp> {
@@ -60,6 +62,19 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
       dbQueryTimeoutMs: options.dbQueryTimeoutMs ?? 10000,
       // Nos testes o loop automático fica desligado (os testes chamam processDue) e o backoff é curto.
       pendingReference: { workerEnabled: false, pollIntervalMs: 50, baseDelayMs: 20, maxAttempts: 3, ...options.pendingReference },
+      // Consumidor e publisher desligados por padrão: os testes chamam pollOnce/publishOnce.
+      consumer: {
+        enabled: false,
+        batchSize: 5,
+        waitTimeSeconds: 1,
+        visibilityTimeoutSeconds: 2,
+        retryBaseDelaySeconds: 1,
+        retryMaxDelaySeconds: 4,
+        shutdownTimeoutMs: 5000,
+        crashAfterCommit: false,
+        ...options.consumer,
+      },
+      outbox: { publisherEnabled: false, pollIntervalMs: 50, batchSize: 20, ...options.outbox },
       sqs: { ...testSqsOptions(), queuePrefix: options.queuePrefix ?? '' },
     }),
     { logger },

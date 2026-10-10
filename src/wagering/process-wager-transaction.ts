@@ -1,20 +1,27 @@
 import { LockMode } from '@mikro-orm/core';
 import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { DuplicateExternalTransactionError, IdempotencyKeyConflictError, WalletNotFoundError } from '../application-errors';
+import {
+  DuplicateExternalTransactionError,
+  IdempotencyKeyConflictError,
+  InboxPayloadConflictError,
+  WalletNotFoundError,
+} from '../application-errors';
 import { APP_CONFIG, type AppConfig } from '../config';
 import {
   copyTransactionState,
   copyWalletState,
+  inboxToRecord,
   ledgerEntryToRecord,
   outboxToRecord,
   transactionToDomain,
   transactionToRecord,
   walletToDomain,
 } from '../database/mappers';
-import { WagerTransactionRecord, WalletRecord } from '../database/records';
+import { InboxMessageRecord, WagerTransactionRecord, WalletRecord } from '../database/records';
 import { FailureCode } from '../domain/failure-code';
 import { isUuid } from '../domain/id';
+import { InboxMessage } from '../domain/inbox-message';
 import {
   WagerTransactionPendingReference,
   WagerTransactionProcessed,
@@ -47,6 +54,15 @@ export interface WagerTransactionResult {
   idempotentReplay: boolean;
 }
 
+/** Mensagem SQS que originou o comando: (consumidor, messageId) identifica a entrega na inbox. */
+export interface InboxContext {
+  consumerName: string;
+  messageId: string;
+}
+
+/** A mensagem já foi processada antes (redelivery): nada a fazer além do ack. */
+export const DUPLICATE_DELIVERY = 'duplicate_delivery' as const;
+
 /** Resultado do reprocessamento de uma transação em PENDING_REFERENCE. */
 export type PendingReferenceOutcome = 'processed' | 'rejected' | 'still_pending' | 'skipped';
 
@@ -71,10 +87,34 @@ export class ProcessWagerTransaction {
     this.retryPolicy = config.pendingReference;
   }
 
+  /** Entrada HTTP. */
   async execute(command: ProcessWagerTransactionCommand): Promise<WagerTransactionResult> {
+    const outcome = await this.process(command, undefined);
+    if (outcome === DUPLICATE_DELIVERY) {
+      throw new Error('Unreachable: duplicate delivery without inbox');
+    }
+    return outcome;
+  }
+
+  /**
+   * Entrada SQS: o registro na inbox `(consumerName, messageId)` entra na MESMA transação SQL
+   * do processamento. Se a mensagem já foi processada (redelivery), devolve DUPLICATE_DELIVERY
+   * sem reprocessar; se o mesmo messageId chegar com outro payload, é erro permanente.
+   */
+  async executeFromMessage(
+    command: ProcessWagerTransactionCommand,
+    inbox: InboxContext,
+  ): Promise<WagerTransactionResult | typeof DUPLICATE_DELIVERY> {
+    return this.process(command, inbox);
+  }
+
+  private async process(
+    command: ProcessWagerTransactionCommand,
+    inbox: InboxContext | undefined,
+  ): Promise<WagerTransactionResult | typeof DUPLICATE_DELIVERY> {
     const stopTimer = this.metrics.processingSeconds.startTimer({ kind: command.kind });
 
-    // Validação do payload antes de tocar no banco: erro aqui é payload inválido (HTTP 400).
+    // Validação do payload antes de tocar no banco: erro aqui é payload inválido (HTTP 400 / DLQ).
     const transaction = WagerTransaction.create({
       ...command,
       kind: command.kind as WagerTransactionKind,
@@ -87,6 +127,12 @@ export class ProcessWagerTransaction {
 
     // Uma wallet = uma transação SQL. Cada execução usa seu próprio EntityManager (fork).
     const result = await this.orm.em.fork().transactional(async (em) => {
+      // 0. Inbox (só via SQS): se não inseriu, esta mensagem já foi processada e commitada.
+      //    Com duas entregas simultâneas, a segunda espera o commit da primeira neste INSERT.
+      if (inbox && !(await this.insertInbox(em, inbox, transaction.payloadHash))) {
+        return this.checkDuplicateDelivery(em, inbox, transaction.payloadHash);
+      }
+
       // 1. Lock da wallet: serializa todas as operações desta wallet, em qualquer instância.
       const walletRecord = await this.lockWallet(em, command.walletId);
 
@@ -123,12 +169,24 @@ export class ProcessWagerTransaction {
     });
 
     stopTimer();
+    if (result === DUPLICATE_DELIVERY) {
+      this.metrics.duplicates.inc({ type: 'inbox' });
+      this.logger.log({
+        message: 'duplicate delivery ignored',
+        correlationId: command.correlationId,
+        messageId: inbox?.messageId,
+        walletId: command.walletId,
+        providerId: command.providerId,
+      });
+      return result;
+    }
     if (!result.idempotentReplay) {
       this.metrics.transactions.inc({ kind: transaction.kind, status: result.status });
     }
     this.logger.log({
       message: 'wager transaction handled',
       correlationId: command.correlationId,
+      messageId: inbox?.messageId,
       transactionId: result.transactionId,
       walletId: command.walletId,
       providerId: command.providerId,
@@ -138,6 +196,36 @@ export class ProcessWagerTransaction {
       idempotentReplay: result.idempotentReplay,
     });
     return result;
+  }
+
+  /** INSERT ... ON CONFLICT DO NOTHING na inbox, na transação corrente. */
+  private async insertInbox(em: EntityManager, inbox: InboxContext, payloadHash: string): Promise<boolean> {
+    const message = InboxMessage.receive({ ...inbox, payloadHash, at: new Date() });
+    message.markProcessed(message.receivedAt); // processado nesta mesma transação SQL
+    const r = inboxToRecord(message);
+    const rows = await em.getConnection().execute<{ message_id: string }[]>(
+      `insert into inbox_messages (consumer_name, message_id, payload_hash, received_at, processed_at)
+       values (?, ?, ?, ?, ?)
+       on conflict do nothing
+       returning message_id`,
+      [r.consumerName, r.messageId, r.payloadHash, r.receivedAt, r.processedAt],
+      'all',
+      em.getTransactionContext(),
+    );
+    return rows.length === 1;
+  }
+
+  private async checkDuplicateDelivery(
+    em: EntityManager,
+    inbox: InboxContext,
+    payloadHash: string,
+  ): Promise<typeof DUPLICATE_DELIVERY> {
+    const existing = await em.findOne(InboxMessageRecord, { consumerName: inbox.consumerName, messageId: inbox.messageId });
+    if (existing && existing.payloadHash !== payloadHash) {
+      this.metrics.duplicates.inc({ type: 'inbox_payload_conflict' });
+      throw new InboxPayloadConflictError(inbox.messageId);
+    }
+    return DUPLICATE_DELIVERY;
   }
 
   /**

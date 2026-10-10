@@ -16,6 +16,26 @@ export interface AppConfig {
     /** Reavaliações antes de desistir (6 → janela de ~2 min com base de 2s). */
     maxAttempts: number;
   };
+  consumer: {
+    /** Consumidor da fila wager-transactions.fifo (pode ser desligado por instância). */
+    enabled: boolean;
+    batchSize: number;
+    waitTimeSeconds: number;
+    visibilityTimeoutSeconds: number;
+    /** Backoff de erro transitório (segundos): base × 2^(receiveCount-1), limitado ao máximo. */
+    retryBaseDelaySeconds: number;
+    retryMaxDelaySeconds: number;
+    /** No SIGTERM, quanto esperar a mensagem em andamento antes de seguir com o shutdown. */
+    shutdownTimeoutMs: number;
+    /** RECURSO DE TESTE: encerra o processo logo após o commit e antes do ack (FAULT_CRASH_AFTER_COMMIT=1). */
+    crashAfterCommit: boolean;
+  };
+  outbox: {
+    /** Publicador da outbox na fila wallet-events.fifo. */
+    publisherEnabled: boolean;
+    pollIntervalMs: number;
+    batchSize: number;
+  };
   sqs: {
     endpoint: string | undefined;
     region: string;
@@ -43,6 +63,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       pollIntervalMs: Number(env.PENDING_REFERENCE_POLL_INTERVAL_MS ?? 1000),
       baseDelayMs: Number(env.PENDING_REFERENCE_BASE_DELAY_MS ?? 2000),
       maxAttempts: Number(env.PENDING_REFERENCE_MAX_ATTEMPTS ?? 6),
+    },
+    consumer: {
+      enabled: (env.SQS_CONSUMER_ENABLED ?? 'true') === 'true',
+      batchSize: Number(env.SQS_CONSUMER_BATCH_SIZE ?? 5),
+      waitTimeSeconds: Number(env.SQS_CONSUMER_WAIT_TIME_SECONDS ?? 10),
+      visibilityTimeoutSeconds: Number(env.SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS ?? 30),
+      retryBaseDelaySeconds: Number(env.SQS_CONSUMER_RETRY_BASE_DELAY_SECONDS ?? 2),
+      retryMaxDelaySeconds: Number(env.SQS_CONSUMER_RETRY_MAX_DELAY_SECONDS ?? 60),
+      shutdownTimeoutMs: Number(env.SQS_CONSUMER_SHUTDOWN_TIMEOUT_MS ?? 10000),
+      crashAfterCommit: env.FAULT_CRASH_AFTER_COMMIT === '1',
+    },
+    outbox: {
+      publisherEnabled: (env.OUTBOX_PUBLISHER_ENABLED ?? 'true') === 'true',
+      pollIntervalMs: Number(env.OUTBOX_POLL_INTERVAL_MS ?? 500),
+      batchSize: Number(env.OUTBOX_BATCH_SIZE ?? 20),
     },
     sqs: {
       endpoint: env.SQS_ENDPOINT,

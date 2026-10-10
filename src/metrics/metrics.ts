@@ -50,6 +50,45 @@ export class Metrics {
     registers: [this.registry],
   });
 
+  readonly messagesConsumed = new Counter({
+    name: 'sqs_messages_consumed_total',
+    help: 'Mensagens da fila wager-transactions por resultado (processed, rejected, pending_reference, replay, duplicate_delivery, retry, dead_letter, released)',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
+  readonly consumerRetries = new Counter({
+    name: 'sqs_consumer_retries_total',
+    help: 'Mensagens devolvidas à fila com backoff por erro transitório',
+    registers: [this.registry],
+  });
+
+  readonly deadLettered = new Counter({
+    name: 'sqs_dead_lettered_total',
+    help: 'Mensagens enviadas explicitamente à DLQ, por motivo',
+    labelNames: ['reason'] as const,
+    registers: [this.registry],
+  });
+
+  readonly eventsPublished = new Counter({
+    name: 'outbox_events_published_total',
+    help: 'Eventos da outbox publicados na fila wallet-events',
+    labelNames: ['eventType'] as const,
+    registers: [this.registry],
+  });
+
+  readonly publishFailures = new Counter({
+    name: 'outbox_publish_failures_total',
+    help: 'Tentativas de publicação da outbox que falharam (evento reagendado com backoff)',
+    registers: [this.registry],
+  });
+
+  readonly outboxLagSeconds = new Gauge({
+    name: 'outbox_lag_seconds',
+    help: 'Idade do evento não publicado mais antigo (0 se não há pendentes)',
+    registers: [this.registry],
+  });
+
   readonly reconciliationMismatches = new Counter({
     name: 'reconciliation_mismatches_total',
     help: 'Reconciliações em que o saldo armazenado diverge do saldo reconstruído pelo ledger',
