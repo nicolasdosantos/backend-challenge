@@ -50,7 +50,7 @@ describe('parseSubmitRequest', () => {
 
 describe('cursor do ledger', () => {
   test('é opaco (base64url) e volta igual', () => {
-    const cursor = { createdAt: '2026-10-10T12:00:00.000Z', id: '0192f291-27dd-7d3f-8071-5f8685deef37' };
+    const cursor = { seq: '12345' };
     const encoded = encodeCursor(cursor);
     expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(decodeCursor(encoded)).toEqual(cursor);
@@ -59,9 +59,12 @@ describe('cursor do ledger', () => {
   test.each([
     'not base64 !!',
     Buffer.from('not json').toString('base64url'),
-    Buffer.from('{"createdAt":"2026-10-10T12:00:00.000Z"}').toString('base64url'),
-    Buffer.from('{"createdAt":"ontem","id":"0192f291-27dd-7d3f-8071-5f8685deef37"}').toString('base64url'),
-    Buffer.from('{"createdAt":"2026-10-10T12:00:00.000Z","id":"x"}').toString('base64url'),
+    Buffer.from('{}').toString('base64url'),
+    Buffer.from('{"seq":12}').toString('base64url'),
+    Buffer.from('{"seq":"0"}').toString('base64url'),
+    Buffer.from('{"seq":"-1"}').toString('base64url'),
+    Buffer.from('{"seq":"1 or 1=1"}').toString('base64url'),
+    Buffer.from('{"seq":"99999999999999999999"}').toString('base64url'),
   ])('cursor inválido %s → erro', (raw) => {
     expect(() => decodeCursor(raw)).toThrow(InvalidRequestError);
   });

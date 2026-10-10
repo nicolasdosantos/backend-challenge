@@ -45,6 +45,9 @@ export class Migration20261010160937_baseline extends Migration {
         result_balance numeric(20,2),
         created_at timestamptz not null,
         processed_at timestamptz,
+        -- reprocessamento de PENDING_REFERENCE (backoff exponencial)
+        reference_attempts integer not null default 0,
+        next_reference_attempt_at timestamptz,
         constraint wager_transactions_idempotency_key_unique unique (idempotency_key),
         constraint wager_transactions_provider_external_unique unique (provider_id, external_transaction_id),
         constraint wager_transactions_kind_valid
@@ -60,7 +63,11 @@ export class Migration20261010160937_baseline extends Migration {
         constraint wager_transactions_failure_code_matches_status
           check ((status in ('REJECTED', 'FAILED')) = (failure_code is not null)),
         constraint wager_transactions_terminal_has_processed_at
-          check ((status in ('PROCESSED', 'REJECTED', 'FAILED')) = (processed_at is not null))
+          check ((status in ('PROCESSED', 'REJECTED', 'FAILED')) = (processed_at is not null)),
+        constraint wager_transactions_reference_attempts_non_negative check (reference_attempts >= 0),
+        -- só (e sempre) uma transação aguardando referência tem próxima tentativa agendada
+        constraint wager_transactions_pending_reference_scheduled
+          check ((status = 'PENDING_REFERENCE') = (next_reference_attempt_at is not null))
       );`);
 
     // Regra 7.4 (leitura estrita): uma transação aceita no máximo UMA reversão processada,
@@ -70,13 +77,17 @@ export class Migration20261010160937_baseline extends Migration {
         on wager_transactions (reference_transaction_id)
         where kind in ('REFUND', 'ROLLBACK') and status = 'PROCESSED';`);
     this.addSql(`
-      create index wager_transactions_pending_reference
-        on wager_transactions (created_at)
+      create index wager_transactions_pending_reference_due
+        on wager_transactions (next_reference_attempt_at)
         where status = 'PENDING_REFERENCE';`);
+    // Resolução de referência: (provider_id, external_transaction_id) já é coberto pela unique.
 
     this.addSql(`
       create table wallet_ledger_entries (
         id uuid primary key,
+        -- ordem de inserção: lançamentos da mesma wallet são serializados pelo lock da wallet,
+        -- então a ordem do seq é a ordem de commit, sem depender do relógio das instâncias
+        seq bigint generated always as identity,
         wallet_id uuid not null,
         transaction_id uuid not null references wager_transactions (id),
         direction text not null,
@@ -87,6 +98,7 @@ export class Migration20261010160937_baseline extends Migration {
         created_at timestamptz not null,
         constraint wallet_ledger_entries_wallet_currency_fk
           foreign key (wallet_id, currency) references wallets (id, currency),
+        constraint wallet_ledger_entries_seq_unique unique (seq),
         constraint wallet_ledger_entries_one_per_transaction unique (transaction_id, wallet_id),
         constraint wallet_ledger_entries_direction_valid check (direction in ('DEBIT', 'CREDIT')),
         constraint wallet_ledger_entries_amount_positive check (amount > 0),
@@ -96,8 +108,8 @@ export class Migration20261010160937_baseline extends Migration {
           or (direction = 'DEBIT' and balance_after = balance_before - amount)
         )
       );`);
-    // Paginação por cursor do ledger: (wallet_id, id), com id UUID v7 ordenado no tempo.
-    this.addSql(`create index wallet_ledger_entries_wallet_cursor on wallet_ledger_entries (wallet_id, id);`);
+    // Paginação por cursor do ledger: keyset em (wallet_id, seq).
+    this.addSql(`create index wallet_ledger_entries_wallet_cursor on wallet_ledger_entries (wallet_id, seq);`);
 
     // Imutabilidade estrutural do ledger: UPDATE, DELETE e TRUNCATE são recusados pelo banco.
     this.addSql(`

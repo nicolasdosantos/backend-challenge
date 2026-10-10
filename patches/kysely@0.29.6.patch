@@ -1,0 +1,53 @@
+diff --git a/dist/dialect/postgres/postgres-driver.js b/dist/dialect/postgres/postgres-driver.js
+index 7778ccd4cab8c514ef05a9070cb52a7dd91d3a1d..6f4b44937d976f29ee9382ba90bb4e46565564cf 100644
+--- a/dist/dialect/postgres/postgres-driver.js
++++ b/dist/dialect/postgres/postgres-driver.js
+@@ -83,6 +83,9 @@ class PostgresConnection {
+     #options;
+     #queryId;
+     #pid;
++    // patch local: erro do lado do cliente (timeout, conexão perdida) deixa a conexão em estado
++    // desconhecido; ela é devolvida ao pg-pool com erro para ser descartada, não reutilizada.
++    #clientSideError;
+     constructor(client, options) {
+         this.#client = client;
+         this.#options = options;
+@@ -123,6 +126,9 @@ class PostgresConnection {
+             };
+         }
+         catch (err) {
++            if (!(err instanceof Error && "severity" in err)) {
++                this.#clientSideError = err;
++            }
+             throw extendStackTrace(err, new Error());
+         }
+         finally {
+@@ -158,7 +164,7 @@ class PostgresConnection {
+         }
+     }
+     [PRIVATE_RELEASE_METHOD]() {
+-        this.#client.release();
++        this.#client.release(this.#clientSideError);
+     }
+     async #executeControlQuery(query, controlConnectionProvider) {
+         if (!this.#queryId) {
+diff --git a/dist/kysely.js b/dist/kysely.js
+index dfc66315db072f215f4a64cc86283dcc3848b376..c1dc76e9157c6e9523da1704a5feb78c992c8278 100644
+--- a/dist/kysely.js
++++ b/dist/kysely.js
+@@ -714,7 +714,14 @@ export class ControlledTransactionBuilder {
+         const settings = { isolationLevel, accessMode };
+         validateTransactionSettings(settings);
+         const connection = await provideControlledConnection(this.#props.executor);
+-        await this.#props.driver.beginTransaction(connection.connection, settings);
++        try {
++            await this.#props.driver.beginTransaction(connection.connection, settings);
++        }
++        catch (error) {
++            // patch local: sem isto, a conexão obtida acima nunca volta ao pool quando o BEGIN falha.
++            connection.release();
++            throw error;
++        }
+         return new ControlledTransaction({
+             ...props,
+             connection,

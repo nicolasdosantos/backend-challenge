@@ -44,11 +44,3 @@ export class InvalidRequestError extends Error {
     this.name = 'InvalidRequestError';
   }
 }
-
-/** Funcionalidade prevista mas ainda não implementada nesta fase (ex.: resolução de referência). */
-export class NotSupportedYetError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'NotSupportedYetError';
-  }
-}

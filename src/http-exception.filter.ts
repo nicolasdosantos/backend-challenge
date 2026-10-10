@@ -4,7 +4,6 @@ import {
   DuplicateWalletError,
   IdempotencyKeyConflictError,
   InvalidRequestError,
-  NotSupportedYetError,
   TransactionNotFoundError,
   WalletNotFoundError,
 } from './application-errors';
@@ -61,7 +60,6 @@ export class HttpExceptionFilter implements ExceptionFilter {
     if (error instanceof DuplicateWalletError) return fail(409, 'WALLET_ALREADY_EXISTS');
     if (error instanceof IdempotencyKeyConflictError) return fail(409, 'IDEMPOTENCY_KEY_CONFLICT');
     if (error instanceof DuplicateExternalTransactionError) return fail(409, 'DUPLICATE_EXTERNAL_TRANSACTION');
-    if (error instanceof NotSupportedYetError) return fail(501, 'NOT_SUPPORTED_YET');
     if (isTransientInfrastructureError(error)) {
       return [503, { code: 'SERVICE_UNAVAILABLE', message: 'Temporary infrastructure failure, retry later', retryable: true }];
     }

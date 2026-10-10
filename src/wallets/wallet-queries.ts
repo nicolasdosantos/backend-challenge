@@ -23,13 +23,43 @@ export interface LedgerPage {
   nextCursor: string | null;
 }
 
+interface LedgerRow {
+  id: string;
+  wallet_id: string;
+  transaction_id: string;
+  direction: string;
+  amount: string;
+  currency: string;
+  balance_before: string;
+  balance_after: string;
+  created_at: string | Date; // consulta crua: o driver devolve timestamptz como string
+  seq: string;
+}
+
+function toLedgerRecord(row: LedgerRow): LedgerEntryRecord {
+  const record = new LedgerEntryRecord();
+  record.id = row.id;
+  record.walletId = row.wallet_id;
+  record.transactionId = row.transaction_id;
+  record.direction = row.direction;
+  record.amount = row.amount;
+  record.currency = row.currency;
+  record.balanceBefore = row.balance_before;
+  record.balanceAfter = row.balance_after;
+  record.createdAt = new Date(row.created_at);
+  return record;
+}
+
 export const DEFAULT_LEDGER_LIMIT = 50;
 export const MAX_LEDGER_LIMIT = 100;
 
-/** Posição da última entrada já entregue. Ordem estável: (created_at, id). */
+/**
+ * Posição do último lançamento já entregue. A ordem é a coluna `seq` (identity): lançamentos da
+ * mesma wallet são inseridos sob o lock da wallet, então a ordem do seq é a ordem de commit,
+ * sem depender do relógio de nenhuma instância.
+ */
 interface LedgerCursor {
-  createdAt: string;
-  id: string;
+  seq: string;
 }
 
 /** Cursor opaco para o cliente: JSON em base64url. O cliente só devolve o que recebeu. */
@@ -40,13 +70,8 @@ export function encodeCursor(cursor: LedgerCursor): string {
 export function decodeCursor(raw: string): LedgerCursor {
   try {
     const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as Partial<LedgerCursor>;
-    if (
-      typeof parsed.createdAt === 'string' &&
-      typeof parsed.id === 'string' &&
-      isUuid(parsed.id) &&
-      !Number.isNaN(Date.parse(parsed.createdAt))
-    ) {
-      return { createdAt: parsed.createdAt, id: parsed.id };
+    if (typeof parsed.seq === 'string' && /^[1-9]\d{0,18}$/.test(parsed.seq)) {
+      return { seq: parsed.seq };
     }
   } catch {
     // cai no erro abaixo
@@ -75,29 +100,31 @@ export class WalletQueries {
   }
 
   /**
-   * Keyset pagination em (created_at, id), da entrada mais antiga para a mais nova.
-   * Entradas novas entram no fim da ordem, então páginas seguintes não repetem nem pulam itens.
+   * Keyset pagination em `seq`, do lançamento mais antigo para o mais novo. Lançamentos novos
+   * recebem seq maior, então páginas seguintes não repetem nem pulam itens.
+   * SQL explícito porque `seq` é gerado pelo banco e não faz parte do registro do ORM.
    */
   async getLedgerPage(walletId: string, rawCursor: string | undefined, rawLimit: string | undefined): Promise<LedgerPage> {
     const limit = parseLimit(rawLimit);
     const cursor = rawCursor === undefined ? undefined : decodeCursor(rawCursor);
     await this.findWallet(walletId);
 
-    const after = cursor && new Date(cursor.createdAt);
-    const records = await this.orm.em.fork().find(
-      LedgerEntryRecord,
-      {
-        walletId,
-        ...(after && cursor && { $or: [{ createdAt: { $gt: after } }, { createdAt: after, id: { $gt: cursor.id } }] }),
-      },
-      { orderBy: { createdAt: 'asc', id: 'asc' }, limit: limit + 1 },
+    const rows = await this.orm.em.getConnection().execute<LedgerRow[]>(
+      `select id, wallet_id, transaction_id, direction, amount::text as amount, currency,
+              balance_before::text as balance_before, balance_after::text as balance_after,
+              created_at, seq::text as seq
+         from wallet_ledger_entries
+        where wallet_id = ? and seq > ?
+        order by seq
+        limit ?`,
+      [walletId, cursor?.seq ?? '0', limit + 1],
     );
 
-    const page = records.slice(0, limit);
+    const page = rows.slice(0, limit);
     const last = page.at(-1);
     return {
-      items: page.map((record) => {
-        const entry = ledgerEntryToDomain(record);
+      items: page.map((row) => {
+        const entry = ledgerEntryToDomain(toLedgerRecord(row));
         return {
           id: entry.id,
           transactionId: entry.transactionId,
@@ -108,8 +135,7 @@ export class WalletQueries {
           createdAt: entry.createdAt.toISOString(),
         };
       }),
-      nextCursor:
-        records.length > limit && last ? encodeCursor({ createdAt: last.createdAt.toISOString(), id: last.id }) : null,
+      nextCursor: rows.length > limit && last ? encodeCursor({ seq: last.seq }) : null,
     };
   }
 

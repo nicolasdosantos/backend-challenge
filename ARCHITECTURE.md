@@ -50,6 +50,8 @@ Classes em `src/domain/`, sem dependência de ORM ou NestJS. Construtor privado 
 | 1 lançamento por transação e wallet | `wallet_ledger_entries_one_per_transaction` |
 | Lançamento na moeda da wallet | FK composta `(wallet_id, currency) → wallets (id, currency)` |
 | Dedup de inbox | PK `(consumer_name, message_id)` |
+| Agendamento de `PENDING_REFERENCE` coerente | `wager_transactions_pending_reference_scheduled`: `(status = PENDING_REFERENCE) = (next_reference_attempt_at is not null)`; `reference_attempts >= 0`; índice parcial nas vencidas |
+| Ordem estável do ledger | `seq bigint generated always as identity` (único), índice `(wallet_id, seq)` |
 
 - `result_balance` em `wager_transactions` guarda o saldo observado ao finalizar a transação, devolvido em replays.
 - `player_id`, `round_id`, `game_id` e ids externos são `text` (vêm do provedor, sem formato garantido); ids internos são `uuid` (v7).
@@ -96,7 +98,7 @@ select ... from wallets where id = ? for update               -- só se a anteri
 
 **Eventos por operação:** BET/WIN → `WagerTransactionProcessed` + `WalletBalanceChanged`; LOSS → só `WagerTransactionProcessed`; rejeição → `WagerTransactionRejected`; abertura com saldo > 0 → `WagerTransactionProcessed` (OPENING) + `WalletBalanceChanged`.
 
-**Limites desta fase:** WIN/LOSS com referência, REFUND e ROLLBACK lançam `NotSupportedYetError` (HTTP 501 `NOT_SUPPORTED_YET`) até a Fase 5 — nunca são ignorados em silêncio.
+**Avaliação única.** `ProcessWagerTransaction.evaluate()` concentra as regras (wallet, referência, reversão, efeito no saldo) e é usada tanto na entrada nova quanto no reprocessamento de `PENDING_REFERENCE` (§6.1). Ela só faz leituras no banco; as escritas acontecem depois, pelo chamador.
 
 ## 4. Idempotência — implementado (Fases 3 e 4)
 
@@ -148,9 +150,32 @@ Tudo no PostgreSQL; nenhum cache em memória participa (provado com 3 processos 
 | WIN / LOSS com referência | Opcional; se presente, validada pela **mesma função** (mesmo provider, player, wallet, moeda e rodada, e deve ser uma BET). Referência ausente → `PENDING_REFERENCE`. | §7 "WIN pode referenciar a BET"; LOSS é o outro resultado da mesma BET. Sem igualdade de valor (regra 5 vale só para reversões). |
 | `playerId` ou moeda do payload ≠ da wallet | `REJECTED` com `failureCode` próprio (`PLAYER_MISMATCH`, `CURRENCY_MISMATCH`) | Rejeição de negócio auditável. |
 | Wallet inexistente | HTTP 404, nada é gravado; via SQS → DLQ | Não existe wallet onde registrar a transação. |
-| Referência existe mas não está `PROCESSED` | `REJECTED`/`FAILED` → rejeita com `REFERENCE_NOT_PROCESSED`; ainda pendente → continua `PENDING_REFERENCE` | — |
-| Reversão que deixaria saldo negativo | `REJECTED` com `REVERSAL_INSUFFICIENT_FUNDS` (≠ `INSUFFICIENT_FUNDS`) | Regra 7.9. |
-| `PENDING_REFERENCE` | Worker com backoff exponencial, até 6 tentativas (2s, 4s, …, 64s ≈ 2 min). Esgotado → `REJECTED` `REFERENCE_NOT_FOUND` + evento. Configurável por variável de ambiente (testes usam valores curtos). | **Trade-off:** janela curta libera o estado rápido, mas uma referência que chegue depois de ~2 min não será casada. Em produção a janela seria calibrada pelo SLA de reenvio dos provedores. |
+| Referência existe mas não está `PROCESSED` | `REJECTED`/`FAILED` → rejeita com `REFERENCE_NOT_PROCESSED`; ainda pendente → continua `PENDING_REFERENCE` (assim a corrente ROLLBACK → REFUND → BET resolve na ordem certa) | — |
+| Referência de outro provider | Não é encontrada (a busca é por `(providerId da transação, referenceExternalTransactionId)`) → `PENDING_REFERENCE` e, se nunca aparecer, `REFERENCE_NOT_FOUND` | Uma referência nunca cruza provedores. |
+| Reversão que deixaria saldo negativo | `REJECTED` com `REVERSAL_INSUFFICIENT_FUNDS` (≠ `INSUFFICIENT_FUNDS`), com commit, sem lançamento | Regra 7.9. |
+| Segunda reversão da mesma referência | `REJECTED` `ALREADY_REVERSED`, com commit. Checado dentro do lock da wallet (a referência válida é da mesma wallet); o índice único parcial é só a última barreira | Regra estrita (acima). |
+| `PENDING_REFERENCE` | Worker com backoff exponencial, até 6 tentativas (2s, 4s, …, 64s ≈ 2 min). Esgotado → `REJECTED` `REFERENCE_NOT_FOUND` (ou `REFERENCE_NOT_PROCESSED`, se a referência existe mas nunca terminou) + evento. Configurável por variável de ambiente (testes usam valores curtos). | **Trade-off:** janela curta libera o estado rápido, mas uma referência que chegue depois de ~2 min não será casada. Em produção a janela seria calibrada pelo SLA de reenvio dos provedores. |
+
+### 6.1 Efeito de cada operação (implementado na Fase 5)
+
+| Operação | Referência | Efeito no saldo | Ledger | Eventos |
+|---|---|---|---|---|
+| `BET` | proibida (400) | débito; sem saldo → `REJECTED INSUFFICIENT_FUNDS` | 1 `DEBIT` | Processed + BalanceChanged / Rejected |
+| `WIN` | opcional (BET da mesma rodada) | crédito | 1 `CREDIT` | Processed + BalanceChanged |
+| `LOSS` | opcional (BET da mesma rodada) | nenhum | nenhum | Processed |
+| `REFUND` | obrigatória, só BET `PROCESSED`, mesmo valor | crédito | 1 `CREDIT` | Processed + BalanceChanged |
+| `ROLLBACK` de BET | obrigatória, mesmo valor | crédito | 1 `CREDIT` | Processed + BalanceChanged |
+| `ROLLBACK` de WIN ou REFUND | obrigatória, mesmo valor | débito; sem saldo → `REJECTED REVERSAL_INSUFFICIENT_FUNDS` | 1 `DEBIT` | Processed + BalanceChanged / Rejected |
+| referência ausente / não terminada | — | nenhum (por enquanto) | nenhum | PendingReference (HTTP 202) |
+
+**Validação da referência** (função única `WagerTransaction.checkReference`, igual para WIN, LOSS, REFUND e ROLLBACK): mesmo provider, player, wallet, moeda e rodada (senão `REFERENCE_MISMATCH`); tipo permitido (`INVALID_REFERENCE_KIND`); referência `REJECTED`/`FAILED` → `REFERENCE_NOT_PROCESSED`; ainda pendente → aguarda; em reversões, valor igual (`AMOUNT_MISMATCH`). Antes dela, `playerId` e moeda são conferidos contra a wallet (`PLAYER_MISMATCH`, `CURRENCY_MISMATCH`).
+
+**Worker de `PENDING_REFERENCE`** (`src/wagering/pending-reference.worker.ts`):
+- Loop com `setTimeout` encadeado (sem dependência nova), iniciado em `onModuleInit` e parado em `onModuleDestroy`, que espera o ciclo em andamento terminar. Intervalo (`PENDING_REFERENCE_POLL_INTERVAL_MS`), atraso base (`PENDING_REFERENCE_BASE_DELAY_MS`) e limite (`PENDING_REFERENCE_MAX_ATTEMPTS`) por variável de ambiente; `PENDING_REFERENCE_WORKER_ENABLED=false` desliga o loop (os testes chamam o ciclo diretamente).
+- Colunas `reference_attempts` e `next_reference_attempt_at` em `wager_transactions`; `CHECK` garante que só (e sempre) uma transação `PENDING_REFERENCE` tem próxima tentativa agendada. Atraso = base × 2^tentativas (2s, 4s, 8s, 16s, 32s, 64s).
+- **Ordem de locks igual à do caminho principal:** a seleção das vencidas é só uma lista de candidatas, sem lock. Para cada uma: abre transação SQL → `FOR UPDATE` na **wallet** → **relê** a transação → confere que ainda está `PENDING_REFERENCE` e vencida → reavalia com a mesma `evaluate()` → grava (status, ledger, saldo, outbox) e faz commit. Se outro worker/instância já resolveu ou reagendou, a releitura vê isso e não faz nada (`skipped`). Por isso dois workers nunca aplicam o mesmo efeito (testado com dois workers simultâneos sobre 20 pendências).
+- Eventos de uma transação resolvida pelo worker usam a própria transação como `correlationId`/`causationId` (a requisição original não fica gravada).
+- Replay de uma transação pendente devolve o estado atual (202 enquanto pendente, 200 depois de processada pelo worker, com o saldo do momento em que foi aplicada).
 | `PENDING` / `FAILED` | `PENDING` é o estado inicial em memória (criação e aplicação ocorrem na mesma transação SQL). `FAILED` é gravado em transação separada para erro permanente de infraestrutura. | — |
 
 ## 7. API — implementado (Fase 4)
@@ -170,7 +195,6 @@ Tudo no PostgreSQL; nenhum cache em memória participa (provado com 3 processos 
 | Mesma chave com outro payload | 409 | `IDEMPOTENCY_KEY_CONFLICT` | false | usar outra chave |
 | Mesmo `(providerId, externalTransactionId)` com outra chave | 409 | `DUPLICATE_EXTERNAL_TRANSACTION` | false | reenviar com a chave original |
 | Wallet duplicada (player + moeda) | 409 | `WALLET_ALREADY_EXISTS` | false | usar a wallet existente |
-| Ainda não implementado (WIN/LOSS com referência, REFUND, ROLLBACK — até a Fase 5) | 501 | `NOT_SUPPORTED_YET` | false | — |
 | Falha transitória de infraestrutura (banco fora, timeout, deadlock) | 503 + `Retry-After: 2` | `SERVICE_UNAVAILABLE` | true | reenviar a mesma requisição (idempotência garante 1 efeito) |
 | Erro inesperado | 500 | `INTERNAL_ERROR` | false | contatar a operação |
 
@@ -180,7 +204,7 @@ Tudo no PostgreSQL; nenhum cache em memória participa (provado com 3 processos 
 
 **503 em vez de 500/travamento:** o pool do `pg` recebe `connectionTimeoutMillis` (`DB_CONNECT_TIMEOUT_MS`, padrão 5 s; também limita a espera por conexão livre) e `query_timeout` (`DB_QUERY_TIMEOUT_MS`, padrão 10 s). Assim, com o banco sem responder (ex.: `docker compose pause postgres`), a requisição falha em vez de travar. `src/infrastructure-errors.ts` classifica como transitório: `ConnectionException`/`DeadlockException`/`LockWaitTimeoutException` do MikroORM, códigos de rede (`ECONNREFUSED`, `ECONNRESET`, …), SQLSTATE de conexão/serialização (`08xxx`, `53300`, `57P01`, `40001`, `40P01`) e as mensagens de timeout do `pg`. A mesma função será usada pelo consumidor SQS (retry × DLQ).
 
-**Ledger com cursor:** keyset em `(created_at, id)` ascendente; cursor opaco = JSON `{ createdAt, id }` em base64url; `limit` padrão 50, máximo 100; cursor/limit inválido → 400. Entradas novas entram no fim da ordem, então páginas seguintes não repetem nem pulam itens (testado com inserções entre páginas). **Limitação:** `created_at` vem do relógio da instância; entre instâncias com relógios desalinhados, uma entrada nova poderia ganhar `created_at` anterior a um cursor já entregue. Mitigação possível: preencher `created_at` com `clock_timestamp()` do banco.
+**Ledger com cursor:** keyset na coluna `seq bigint generated always as identity` de `wallet_ledger_entries` (índice `(wallet_id, seq)`); cursor opaco = JSON `{ seq }` em base64url; `limit` padrão 50, máximo 100; cursor/limit inválido → 400. Lançamentos da mesma wallet são inseridos sob o lock da wallet, então a ordem do `seq` é a ordem de commit — não depende do relógio de nenhuma instância. Páginas seguintes não repetem nem pulam itens (testado com inserções entre páginas).
 
 ## 8. Autenticação — decidido: não implementar
 
@@ -197,7 +221,9 @@ Autenticação não pontua (enunciado §2). Ponto de extensão: `src/auth/provid
 
 | Métrica | Tipo | Desde |
 |---|---|---|
-| `wager_transactions_total{kind,status}` | counter (só transações novas, não replays) | Fase 3 |
+| `wager_transactions_total{kind,status}` | counter: transações que chegaram a cada status, inclusive `PENDING_REFERENCE` e as resolvidas pelo worker (replays não contam) | Fase 3 |
+| `pending_reference_retries_total{outcome}` | counter: reavaliações do worker (`processed`, `rejected`, `still_pending`, `skipped`) | Fase 5 |
+| `wager_transactions_pending_reference` | gauge: transações aguardando referência (atualizado a cada ciclo do worker) | Fase 5 |
 | `wager_transaction_processing_seconds{kind}` | histogram (inclui espera pelo lock) | Fase 3 |
 | `wallet_lock_conflicts_total` | counter (wallet já travada por outra transação) | Fase 3 |
 | `reconciliation_mismatches_total` | counter | Fase 3 |
@@ -215,6 +241,11 @@ Autenticação não pontua (enunciado §2). Ponto de extensão: `src/auth/provid
 - **Indisponibilidade do banco nos testes:** dentro do container de testes não há `docker`, então `test/support/tcp-proxy.ts` (proxy TCP de teste entre app e PostgreSQL) simula o `docker compose pause`: em pausa, descarta todos os bytes. O `docker compose pause postgres` real foi verificado manualmente a partir do host (503 + `Retry-After`, processo continua vivo, reenvio processa uma única vez).
 - **Múltiplas instâncias:** `test/concurrency/multi-instance.test.ts` sobe 3 processos `bun run src/main.ts` (portas 3101–3103) com `Bun.spawn`, todos no mesmo PostgreSQL.
 
-## 11. Problemas conhecidos
+## 11. Problemas conhecidos e patches
 
-- **Vazamento de conexão quando o `BEGIN` falha (bug do kysely 0.29.6, usado pelo MikroORM 7.2.5; 0.29.6 também é a versão mais recente).** Em `ControlledTransactionBuilder.execute()`, a conexão é obtida do pool e, se `beginTransaction` lança (ex.: `Query read timeout` com o banco sem responder), ela nunca é liberada. Medido: depois de 1 POST durante a pausa, o pool fica com 1 conexão emprestada para sempre (também após o banco voltar); consultas simples (sem transação) não vazam. Impacto: cada `BEGIN` que falha consome 1 das `DB_POOL_MAX` conexões; após N falhas a instância só responde 503 até reiniciar, e o `close()` (shutdown) espera para sempre por elas. **Correção proposta, aguardando autorização:** `bun patch kysely` liberando (e descartando) a conexão no `catch` do `beginTransaction` — cerca de 4 linhas, com teste. Até lá, o teste de indisponibilidade fecha o app com prazo limitado e há um `test.todo` registrando o comportamento esperado.
+- **Patch local no kysely 0.29.6 (vazamento de conexão quando o `BEGIN` falha) — aplicado.**
+  - **Bug:** em `ControlledTransactionBuilder.execute()` (kysely 0.29.6, usado pelo MikroORM 7.2.5; 0.29.6 também era a versão mais recente publicada), a conexão é obtida do pool e, se `beginTransaction` lança (ex.: `Query read timeout` com o banco sem responder), ela nunca é liberada.
+  - **Medição antes do patch:** 1 conexão presa por POST feito com o banco pausado, também depois de o banco voltar; consultas sem transação não vazavam. Impacto: após `DB_POOL_MAX` falhas a instância só respondia 503 até reiniciar, e o `close()` do shutdown esperava para sempre.
+  - **Patch** (`patches/kysely@0.29.6.patch`, registrado em `patchedDependencies` do `package.json`; o `Dockerfile` copia `patches/` antes do `bun install`): (1) no `catch` do `beginTransaction`, a conexão é liberada; (2) em `PostgresConnection`, se uma consulta falha por erro **do lado do cliente** (timeout, conexão perdida — erros sem `severity`, que só os erros do servidor têm), a conexão é devolvida ao `pg-pool` com erro, para ser **descartada** em vez de reutilizada. O item (2) evita devolver ao pool uma conexão em estado desconhecido (por exemplo, um `BEGIN` que ainda vai ser executado no servidor quando ele voltar do `pause`, deixando uma transação aberta para a próxima requisição).
+  - **Teste:** `test/integration/database-unavailable.test.ts` faz mais falhas de `BEGIN` (6) do que o tamanho do pool (4) com o banco pausado e prova que, quando ele volta, não há conexões presas e a instância responde 200 sem reiniciar; o `close()` do teste fecha normalmente (sem timeout de contorno). Rodado também **sem** o patch, o mesmo teste falha (2 conexões presas e `close()` travado).
+  - **Remover o patch** quando o upstream do kysely corrigir o `ControlledTransactionBuilder` (e o MikroORM passar a depender dessa versão).

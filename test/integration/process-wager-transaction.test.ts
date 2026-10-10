@@ -1,8 +1,9 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { NotSupportedYetError, WalletNotFoundError } from '../../src/application-errors';
+import { WalletNotFoundError } from '../../src/application-errors';
 import { InvalidMoneyError, InvalidWagerTransactionError } from '../../src/domain/errors';
 import { newId } from '../../src/domain/id';
+import { APP_CONFIG, type AppConfig } from '../../src/config';
 import { Metrics } from '../../src/metrics/metrics';
 import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import { createTestApp, type TestApp } from '../support/app';
@@ -122,10 +123,13 @@ describe('ProcessWagerTransaction — entradas inválidas (nada é gravado)', ()
     ['LOSS com referência', { kind: 'LOSS', referenceExternalTransactionId: 'bet-1' }],
     ['REFUND', { kind: 'REFUND', referenceExternalTransactionId: 'bet-1' }],
     ['ROLLBACK', { kind: 'ROLLBACK', referenceExternalTransactionId: 'bet-1' }],
-  ])('%s: erro explícito de "não suportado ainda" (Fase 5), sem gravar nada', async (_label, overrides) => {
+  ])('%s com referência inexistente: PENDING_REFERENCE gravada, sem lançamento, evento PendingReference', async (_label, overrides) => {
     const w = await wallet();
-    await expect(useCase.execute(wagerCommand(w, overrides))).rejects.toBeInstanceOf(NotSupportedYetError);
-    expect(await countRows(t.orm, `select 1 from wager_transactions where wallet_id = ? and kind <> 'OPENING'`, [w.id])).toBe(0);
+    const result = await useCase.execute(wagerCommand(w, { ...overrides, referenceExternalTransactionId: `missing-${newId()}` }));
+    expect(result).toMatchObject({ status: 'PENDING_REFERENCE', balance: { amount: '100.00', currency: 'BRL' } });
+    expect(await walletRow(w.id)).toEqual({ balance: '100.00', version: 1 });
+    expect(await countRows(t.orm, `select 1 from wallet_ledger_entries where transaction_id = ?`, [result.transactionId])).toBe(0);
+    expect((await outboxTypes(w.id)).slice(2)).toEqual(['WagerTransactionPendingReference']);
   });
 
   test('wallet inexistente (ou id que não é UUID): WalletNotFoundError', async () => {
@@ -165,7 +169,7 @@ class FailingBeforeCommit extends ProcessWagerTransaction {
     t: TestApp,
     private readonly walletId: string,
   ) {
-    super(t.orm, t.app.get(Metrics));
+    super(t.orm, t.app.get(Metrics), t.app.get<AppConfig>(APP_CONFIG));
   }
 
   protected override async beforeCommit(em: EntityManager): Promise<void> {

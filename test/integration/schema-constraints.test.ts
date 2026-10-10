@@ -110,6 +110,21 @@ describe('wager_transactions', () => {
     await db.transaction(walletId, { status: 'REJECTED', failureCode: 'INSUFFICIENT_FUNDS' });
   });
 
+  test('PENDING_REFERENCE exige próxima tentativa agendada, e só ela pode tê-la', async () => {
+    const walletId = await db.wallet();
+    await expectDbError(
+      db.transaction(walletId, { kind: 'REFUND', status: 'PENDING_REFERENCE', referenceExternalTransactionId: 'x' }),
+      SQLSTATE.checkViolation,
+      'wager_transactions_pending_reference_scheduled',
+    );
+    const id = await db.transaction(walletId);
+    await expectDbError(
+      db.execute(`update wager_transactions set next_reference_attempt_at = now() where id = ?`, [id]),
+      SQLSTATE.checkViolation,
+      'wager_transactions_pending_reference_scheduled',
+    );
+  });
+
   test('uma referência aceita no máximo UMA reversão processada (REFUND ou ROLLBACK)', async () => {
     const walletId = await db.wallet();
     const betId = await db.transaction(walletId, { kind: 'BET' });

@@ -186,7 +186,7 @@ describe('WagerTransaction — estados', () => {
 
   test('PENDING → PENDING_REFERENCE → PROCESSED', () => {
     const tx = WagerTransaction.create(wagerProps({ kind: Kind.Refund, referenceExternalTransactionId: 'b' }));
-    tx.markPendingReference();
+    tx.markPendingReference(at);
     expect(tx.status).toBe(Status.PendingReference);
     expect(tx.isTerminal()).toBe(false);
     tx.markProcessed('ref-id', at, brl('100.00'));
@@ -196,13 +196,13 @@ describe('WagerTransaction — estados', () => {
 
   test('PENDING_REFERENCE → REJECTED quando a referência nunca chega', () => {
     const tx = WagerTransaction.create(wagerProps({ kind: Kind.Rollback, referenceExternalTransactionId: 'b' }));
-    tx.markPendingReference();
+    tx.markPendingReference(at);
     tx.reject(FailureCode.ReferenceNotFound, at, brl('100.00'));
     expect(tx.failureCode).toBe(FailureCode.ReferenceNotFound);
   });
 
   test('transação sem referência não pode aguardar referência', () => {
-    expect(() => WagerTransaction.create(wagerProps()).markPendingReference()).toThrow(InvalidTransactionStateError);
+    expect(() => WagerTransaction.create(wagerProps()).markPendingReference(at)).toThrow(InvalidTransactionStateError);
   });
 
   test.each([
@@ -215,7 +215,7 @@ describe('WagerTransaction — estados', () => {
     expect(() => tx.markProcessed(undefined, at, brl('1.00'))).toThrow(InvalidTransactionStateError);
     expect(() => tx.reject(FailureCode.InsufficientFunds, at, brl('1.00'))).toThrow(InvalidTransactionStateError);
     expect(() => tx.fail(FailureCode.InternalError, at)).toThrow(InvalidTransactionStateError);
-    expect(() => tx.markPendingReference()).toThrow(InvalidTransactionStateError);
+    expect(() => tx.markPendingReference(at)).toThrow(InvalidTransactionStateError);
   });
 });
 
@@ -238,5 +238,29 @@ describe('WagerTransaction — idempotência', () => {
     });
     expect(copy.status).toBe(Status.Processed);
     expect(copy.resultBalance?.amount).toBe('75.00');
+  });
+});
+
+describe('WagerTransaction — reprocessamento de PENDING_REFERENCE', () => {
+  test('agenda a 1ª reavaliação ao entrar em PENDING_REFERENCE e conta cada nova tentativa', () => {
+    const tx = WagerTransaction.create(wagerProps({ kind: Kind.Refund, referenceExternalTransactionId: 'b' }));
+    const first = new Date(at.getTime() + 2000);
+    tx.markPendingReference(first);
+    expect(tx.nextReferenceAttemptAt).toEqual(first);
+    expect(tx.referenceAttempts).toBe(0);
+
+    const second = new Date(at.getTime() + 6000);
+    tx.scheduleReferenceRetry(second);
+    expect(tx.referenceAttempts).toBe(1);
+    expect(tx.nextReferenceAttemptAt).toEqual(second);
+  });
+
+  test('estado terminal limpa o agendamento; só PENDING_REFERENCE pode ser reagendada', () => {
+    const tx = WagerTransaction.create(wagerProps({ kind: Kind.Refund, referenceExternalTransactionId: 'b' }));
+    expect(() => tx.scheduleReferenceRetry(at)).toThrow(InvalidTransactionStateError);
+    tx.markPendingReference(at);
+    tx.reject(FailureCode.ReferenceNotFound, at, brl('100.00'));
+    expect(tx.nextReferenceAttemptAt).toBeUndefined();
+    expect(() => tx.scheduleReferenceRetry(at)).toThrow(InvalidTransactionStateError);
   });
 });

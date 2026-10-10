@@ -59,7 +59,7 @@ describe('Integration events', () => {
     const refund = WagerTransaction.create(
       wagerProps({ kind: WagerTransactionKind.Refund, referenceExternalTransactionId: 'bet-1' }),
     );
-    refund.markPendingReference();
+    refund.markPendingReference(at);
     const json = WagerTransactionPendingReference.from(refund, ctx).toJSON();
     expect(json.data.referenceExternalTransactionId).toBe('bet-1');
   });

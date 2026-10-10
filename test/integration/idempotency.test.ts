@@ -1,6 +1,7 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { IdempotencyKeyConflictError } from '../../src/application-errors';
+import { APP_CONFIG, type AppConfig } from '../../src/config';
 import { Metrics } from '../../src/metrics/metrics';
 import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import { createTestApp, type TestApp } from '../support/app';
@@ -85,7 +86,7 @@ class PausingBeforeCommit extends ProcessWagerTransaction {
   readonly reachedCommit = new Promise<void>((resolve) => (this.reachedResolve = resolve));
 
   constructor(t: TestApp) {
-    super(t.orm, t.app.get(Metrics));
+    super(t.orm, t.app.get(Metrics), t.app.get<AppConfig>(APP_CONFIG));
   }
 
   letCommit() {

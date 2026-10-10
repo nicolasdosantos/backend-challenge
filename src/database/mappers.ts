@@ -71,6 +71,8 @@ export function transactionToDomain(record: WagerTransactionRecord, walletCurren
     failureCode: (record.failureCode ?? undefined) as FailureCode | undefined,
     processedAt: record.processedAt ?? undefined,
     resultBalance: record.resultBalance != null ? money(record.resultBalance, walletCurrency) : undefined,
+    referenceAttempts: record.referenceAttempts,
+    nextReferenceAttemptAt: record.nextReferenceAttemptAt ?? undefined,
   });
 }
 
@@ -89,12 +91,19 @@ export function transactionToRecord(tx: WagerTransaction): WagerTransactionRecor
   record.amount = tx.money.amount;
   record.currency = tx.money.currency;
   record.referenceExternalTransactionId = tx.referenceExternalTransactionId ?? null;
+  record.createdAt = tx.createdAt;
+  return copyTransactionState(tx, record);
+}
+
+/** Copia o estado mutável (status e resultado) para um registro; usado também no reprocessamento. */
+export function copyTransactionState(tx: WagerTransaction, record: WagerTransactionRecord): WagerTransactionRecord {
   record.referenceTransactionId = tx.referenceTransactionId ?? null;
   record.status = tx.status;
   record.failureCode = tx.failureCode ?? null;
   record.resultBalance = tx.resultBalance?.amount ?? null;
-  record.createdAt = tx.createdAt;
   record.processedAt = tx.processedAt ?? null;
+  record.referenceAttempts = tx.referenceAttempts;
+  record.nextReferenceAttemptAt = tx.nextReferenceAttemptAt ?? null;
   return record;
 }
 

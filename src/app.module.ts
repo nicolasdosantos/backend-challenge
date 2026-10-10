@@ -8,6 +8,7 @@ import { HttpExceptionFilter } from './http-exception.filter';
 import { Metrics } from './metrics/metrics';
 import { MetricsController } from './metrics/metrics.controller';
 import { createSqsClient, SQS_CLIENT } from './sqs/sqs';
+import { PendingReferenceWorker } from './wagering/pending-reference.worker';
 import { ProcessWagerTransaction } from './wagering/process-wager-transaction';
 import { TransactionQueries } from './wagering/transaction-queries';
 import { WageringController } from './wagering/wagering.controller';
@@ -34,6 +35,7 @@ export class AppModule {
         { provide: APP_FILTER, useClass: HttpExceptionFilter },
         Metrics,
         ProcessWagerTransaction,
+        PendingReferenceWorker,
         CreateWallet,
         ReconciliationService,
         WalletQueries,
