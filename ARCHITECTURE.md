@@ -132,14 +132,64 @@ Tudo no PostgreSQL; nenhum cache em memória participa (provado com 3 processos 
 **Implementado:**
 - Filas FIFO: `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e `wallet-events.fifo`. Criadas por `scripts/create-queues.ts` (idempotente), executado pelo serviço `sqs-init` do Compose.
 - Redrive policy: `wager-transactions.fifo` → DLQ após `maxReceiveCount = 5`.
-- **`wallet-events.fifo` é uma interpretação.** O enunciado (§10) lista apenas `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, mas exige que a outbox publique eventos de integração (§11) sem dizer onde. Publicar os eventos na própria `wager-transactions.fifo` misturaria comandos de entrada com eventos de saída: o consumidor teria de ignorar mensagens que não são `WagerTransactionRequested`, e um evento malformado poderia ir parar na DLQ de transações. Por isso, uma fila separada só para saída. `MessageGroupId` = `aggregateId` (walletId) preserva a ordem por wallet; `MessageDeduplicationId` = `eventId` reduz duplicatas na janela de 5 min do SQS — os consumidores ainda devem deduplicar pelo `eventId`.
+- **`wallet-events.fifo` é uma interpretação.** O enunciado (§10) lista apenas `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, mas exige que a outbox publique eventos de integração (§11) sem dizer onde. Publicar os eventos na própria `wager-transactions.fifo` misturaria comandos de entrada com eventos de saída: o consumidor teria de ignorar mensagens que não são `WagerTransactionRequested`, e um evento malformado poderia ir parar na DLQ de transações. Por isso, uma fila separada só para saída. `MessageGroupId` = `aggregateId` (walletId); `MessageDeduplicationId` = `eventId` reduz duplicatas na janela de 5 min do SQS — os consumidores ainda devem deduplicar pelo `eventId`.
+
+### 5.1 Consumidor (`src/messaging/wager-transaction.consumer.ts`) — implementado (Fase 6)
+
+Roda dentro da app (provider NestJS), ligado por `SQS_CONSUMER_ENABLED`. Long polling (`SQS_CONSUMER_WAIT_TIME_SECONDS`), lote pequeno (`SQS_CONSUMER_BATCH_SIZE`), mensagens processadas uma a uma.
+
+1. Valida o envelope do enunciado (`messageId`, `type = WagerTransactionRequested`, `occurredAt`, `data` com `idempotencyKey`) e o `data` com a **mesma** função de validação da API (`parseWagerPayload`).
+2. Chama o **mesmo** `ProcessWagerTransaction` da API (`executeFromMessage`), com `idempotencyKey = data.idempotencyKey`. O `messageId` vira `correlationId`/`causationId` dos eventos, mas **não** entra no `payloadHash`.
+3. **Inbox na mesma transação SQL** do processamento: `INSERT INTO inbox_messages ... ON CONFLICT DO NOTHING` em `(consumer_name, message_id)` é o primeiro comando da transação, junto com wallet, transação, ledger e outbox. Rollback desfaz a inbox também. Se não inseriu, é **redelivery**: nada é reprocessado e a mensagem é confirmada. Com duas entregas simultâneas, a segunda espera o commit da primeira nesse INSERT. A inbox guarda o `payload_hash`; mesmo `messageId` com outro payload → erro permanente.
+4. **Ack (`DeleteMessage`) só depois do commit.** Se o ack falhar, a mensagem volta após o visibility timeout e a inbox a reconhece.
+
+**Classificação de erros:**
+
+| Tipo | Exemplos | Ação |
+|---|---|---|
+| Resultado de negócio (terminal) | `PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay de idempotência, redelivery (inbox) | commit → ack |
+| Transitório | banco indisponível, timeout, deadlock, falha temporária do SQS (`isTransientInfrastructureError`) | sem ack; `ChangeMessageVisibility` com backoff |
+| Permanente | JSON inválido, envelope inválido, `type` desconhecido, payload inválido (inclui `OPENING`), wallet inexistente, conflito de idempotência, `externalTransactionId` duplicado, conflito de inbox | `SendMessage` na DLQ (com atributos `reason` e `error`) e **só então** `DeleteMessage`; log `error` + métrica `sqs_dead_lettered_total{reason}` |
+| Inesperado (bug, erro desconhecido) | — | tratado como transitório: retry com backoff, limitado pela redrive policy |
+
+**Backoff × `maxReceiveCount`:** atraso = `SQS_CONSUMER_RETRY_BASE_DELAY_SECONDS × 2^(ApproximateReceiveCount − 1)`, limitado a `SQS_CONSUMER_RETRY_MAX_DELAY_SECONDS`. Com os padrões (base 2s, máximo 60s) e `maxReceiveCount = 5`: as 4 primeiras falhas devolvem a mensagem após 2s, 4s, 8s e 16s; a 5ª falha agenda mais 32s e, no recebimento seguinte, a redrive policy move a mensagem para a DLQ — cerca de 1 minuto de tolerância a indisponibilidade antes da DLQ. A contagem é do próprio SQS (não depende de memória do processo), então vale entre instâncias e reinícios.
+
+**SIGTERM:** o hook `onModuleDestroy` (com `enableShutdownHooks`) para de buscar mensagens (aborta o long polling), devolve a visibilidade (`VisibilityTimeout = 0`) das mensagens recebidas e ainda não iniciadas e espera a mensagem em andamento até `SQS_CONSUMER_SHUTDOWN_TIMEOUT_MS`. Se o tempo esgotar, loga `warn` e segue o shutdown; a transação em andamento ou commita (e a reentrega vira redelivery na inbox) ou é desfeita (e a mensagem é reprocessada). O processo termina pelo próprio NestJS, que reemite o `SIGTERM` após fechar o app (código 143 — medido).
+
+**Falha injetada (recurso de teste):** `FAULT_CRASH_AFTER_COMMIT=1` faz o consumidor chamar `process.exit(1)` logo depois do commit e antes do ack. Lida só da variável de ambiente, inerte por padrão, usada no teste do cenário §13 #5. Nunca definir em produção.
+
+**Ordem:** o provedor escolhe o `MessageGroupId`; mensagens do mesmo grupo são entregues em ordem e uma de cada vez. A correção **não** depende disso: o lock da wallet, a idempotência e a inbox garantem o resultado mesmo com grupos diferentes ou entregas paralelas (testado com 3 processos).
+
+### 5.2 Publisher da outbox (`src/messaging/outbox-publisher.ts`) — implementado (Fase 6)
+
+Loop agendado dentro da app (`OUTBOX_PUBLISHER_ENABLED`, `OUTBOX_POLL_INTERVAL_MS`, `OUTBOX_BATCH_SIZE`). Cada ciclo é **uma transação SQL**:
+
+```sql
+select ... from outbox_messages
+ where published_at is null and (next_attempt_at is null or next_attempt_at <= :now)
+ order by occurred_at, id
+ limit :batch
+ for update skip locked;
+-- para cada linha: SendMessage (corpo = envelope do evento, MessageGroupId = walletId,
+--                  MessageDeduplicationId = eventId) → published_at = now
+--                  falha no envio → scheduleRetry (attempts + 1, backoff 1s, 2s, 4s… até 5 min)
+commit;
+```
+
+- **Nada é publicado antes do commit do negócio:** o publisher só enxerga linhas já commitadas na outbox.
+- **Vários publishers:** `SKIP LOCKED` faz cada um pegar um lote diferente (testado: 2 publishers, 60 eventos, soma dos enviados = 60, cada evento exatamente uma vez na fila).
+- **Crash:** se o processo morre depois do envio e antes do commit, a transação é desfeita, o lock cai e outro publisher reenvia. Entrega **at-least-once**: o `MessageDeduplicationId = eventId` costuma absorver o reenvio no broker (janela de 5 min do FIFO), mas o consumidor de eventos deve deduplicar pelo `eventId` — testado com uma duplicata forçada (mesmo evento com outro deduplication id) e um consumidor que deduplica pela inbox.
+- **Falha de envio:** o evento é reagendado (`attempts`, `next_attempt_at`) e **nunca** marcado como publicado sem ter sido enviado.
+- **Trade-off — transação aberta durante o envio:** a transação segura o lock das linhas do lote enquanto chama o SQS. Vantagem: simples e seguro (não existe estado "reservado" para limpar; morreu, desfez). Custo: conexões e locks presos durante chamadas de rede; por isso lotes pequenos e timeouts do pool. Alternativa (não adotada): marcar o lote como "em publicação" com prazo, publicar fora da transação e confirmar depois — mais escalável, mas exige recuperar reservas expiradas.
+- **Ordem dos eventos é best-effort:** com 2 publishers em paralelo, ou com um evento em retry, eventos de uma mesma wallet podem sair fora de ordem. O consumidor deve deduplicar pelo `eventId` e ordenar pelo `walletVersion` (em `WalletBalanceChanged`) quando precisar.
+- **Outbox lag:** gauge `outbox_lag_seconds` com a idade do evento não publicado mais antigo, atualizado a cada ciclo.
 
 **Escolha do emulador — MiniStack em vez de LocalStack:**
 - Desde a versão 2026.03.0, a imagem do LocalStack exige auth token de conta para iniciar; o avaliador também precisaria de conta. O enunciado aceita MiniStack, que é MIT e não exige conta.
 - Antes de adotar, `scripts/check-sqs-emulator.ts` comprovou: ordem FIFO por `MessageGroupId` (e bloqueio do grupo com mensagem em voo), dedup por `MessageDeduplicationId`, `ChangeMessageVisibility`, reentrega após visibility timeout (com `ApproximateReceiveCount`) e redrive para DLQ via `maxReceiveCount`. Resultado: 6/6 PASS.
 - Plano B, não utilizado: LocalStack fixado em tag anterior a 2026.03.
 
-**Decidido (Fase 6):** consumidor com ack somente após commit; erros de negócio → ack; transitórios → retry com backoff via `ChangeMessageVisibility`; permanentes → DLQ. Wallet inexistente via SQS é **erro permanente** (não há onde gravar a transação) → DLQ.
+**Comportamento do MiniStack nos testes da Fase 6:** FIFO, deduplicação por `MessageDeduplicationId`, `ChangeMessageVisibility` (inclusive `0`), reentrega após visibility timeout, redrive para a DLQ por `maxReceiveCount` e atributos de mensagem funcionaram como no SQS; nenhuma divergência observada.
 
 ## 6. Regras de negócio — interpretações adotadas
 
@@ -215,7 +265,7 @@ Autenticação não pontua (enunciado §2). Ponto de extensão: `src/auth/provid
 **Implementado:** logs JSON pelo `ConsoleLogger` nativo do NestJS (`json: true`), sem dependência extra. `/health/live` (processo vivo) e `/health/ready` (`select 1` no PostgreSQL + `GetQueueUrl` no SQS, timeout de 2s cada; 503 se algum falhar). Cada check que falha gera log `warn` com o nome do check e `nome: mensagem` do erro (sem connection string ou credenciais), ex.: `{"level":"warn","message":{"message":"readiness check failed","check":"postgres","reason":"Error: timeout after 2000ms"}}`.
 - O readiness usa `select 1` porque o `checkConnection()` do MikroORM 7 responde "Connection not established" sem ir ao banco enquanto o pool não abriu conexão.
 
-**Logs das operações (Fase 3):** `{ message, correlationId, transactionId, walletId, providerId, kind, status, failureCode, idempotentReplay }` — sem valores monetários nem payload completo. `correlationId` vem do header `x-correlation-id` (ou é gerado). `messageId` entra na Fase 6.
+**Logs das operações:** `{ message, correlationId, messageId, transactionId, walletId, providerId, kind, status, failureCode, idempotentReplay }` — sem valores monetários nem payload completo. `correlationId` vem do header `x-correlation-id` (ou é gerado); via SQS é o `messageId`.
 
 **Métricas (`GET /metrics`, formato Prometheus) — `prom-client` 15.1.3.** Escolhido por ser o padrão de fato, pure JS (verificado rodando no Bun antes de adotar) e por já trazer histogramas com buckets, que seriam trabalhosos de escrever à mão. Usa um `Registry` próprio (não o global), para que vários apps no mesmo processo de teste não colidam.
 
@@ -228,7 +278,13 @@ Autenticação não pontua (enunciado §2). Ponto de extensão: `src/auth/provid
 | `wallet_lock_conflicts_total` | counter (wallet já travada por outra transação) | Fase 3 |
 | `reconciliation_mismatches_total` | counter | Fase 3 |
 | `idempotency_duplicates_total{type}` | counter (replay, conflito de chave, external duplicado) | Fase 4 |
-| retries, DLQ, outbox lag | — | Fase 6 |
+| `sqs_messages_consumed_total{outcome}` | counter: mensagens por resultado (`processed`, `rejected`, `pending_reference`, `replay`, `duplicate_delivery`, `retry`, `dead_letter`, `released`) | Fase 6 |
+| `idempotency_duplicates_total{type="inbox"}` | counter: redeliveries reconhecidas pela inbox | Fase 6 |
+| `sqs_consumer_retries_total` | counter: mensagens devolvidas com backoff | Fase 6 |
+| `sqs_dead_lettered_total{reason}` | counter: mensagens enviadas à DLQ pelo consumidor | Fase 6 |
+| `outbox_events_published_total{eventType}` | counter | Fase 6 |
+| `outbox_publish_failures_total` | counter | Fase 6 |
+| `outbox_lag_seconds` | gauge: idade do evento pendente mais antigo | Fase 6 |
 
 **Reconciliação (`POST /wallets/:walletId/reconciliation`).** Uma única consulta SQL lê o saldo armazenado e soma créditos e débitos do ledger (mesmo snapshot, sem falso alarme por commit no meio). Devolve `storedBalance`, `calculatedBalance`, `difference` (= armazenado − calculado), `consistent`, `checkedEntries`. Divergência gera log `error`, incrementa `reconciliation_mismatches_total` e é sinalizada na resposta; **nunca é corrigida**.
 
@@ -240,6 +296,7 @@ Autenticação não pontua (enunciado §2). Ponto de extensão: `src/auth/provid
 - **Windows não entrega SIGTERM**: medido com `Bun.spawn` + `kill('SIGTERM')` — o handler não executa e o processo morre com código 143. Não existe distro Linux no WSL (só `docker-desktop`), então testes de processo/sinais rodam no container Linux: `docker compose run --rm tests`, onde passam.
 - **Indisponibilidade do banco nos testes:** dentro do container de testes não há `docker`, então `test/support/tcp-proxy.ts` (proxy TCP de teste entre app e PostgreSQL) simula o `docker compose pause`: em pausa, descarta todos os bytes. O `docker compose pause postgres` real foi verificado manualmente a partir do host (503 + `Retry-After`, processo continua vivo, reenvio processa uma única vez).
 - **Múltiplas instâncias:** `test/concurrency/multi-instance.test.ts` sobe 3 processos `bun run src/main.ts` (portas 3101–3103) com `Bun.spawn`, todos no mesmo PostgreSQL.
+- **Mensageria nos testes:** cada arquivo cria filas com prefixo único (`test/support/sqs.ts`). Consumidor e publisher ficam desligados no app de teste e são conduzidos por `pollOnce()`/`publishOnce()`; os cenários de crash, SIGTERM, 3 consumidores e reinício sobem **processos reais** com `test/support/instances.ts`. Arquivos que verificam a fila de eventos marcam como publicados, no banco de teste, os eventos acumulados por outros arquivos (`discardForeignOutboxBacklog`), que não fazem parte do cenário.
 
 ## 11. Problemas conhecidos e patches
 
