@@ -44,3 +44,11 @@ export class InvalidRequestError extends Error {
     this.name = 'InvalidRequestError';
   }
 }
+
+/** O mesmo messageId chegou de novo com outro payload: mensagem corrompida ou reutilizada (permanente). */
+export class InboxPayloadConflictError extends Error {
+  constructor(messageId: string) {
+    super(`Message ${messageId} was already processed with a different payload`);
+    this.name = 'InboxPayloadConflictError';
+  }
+}
