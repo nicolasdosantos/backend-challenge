@@ -94,8 +94,8 @@ describe('POST /wagering/transactions — sucesso e replays', () => {
     await t.orm.em.getConnection().execute(
       `insert into wager_transactions (id, provider_id, external_transaction_id, idempotency_key, payload_hash,
          wallet_id, player_id, round_id, game_id, kind, amount, currency, reference_external_transaction_id,
-         status, created_at)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'REFUND', '25.00', 'BRL', ?, 'PENDING_REFERENCE', now())`,
+         status, created_at, next_reference_attempt_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'REFUND', '25.00', 'BRL', ?, 'PENDING_REFERENCE', now(), now() + interval '1 hour')`,
       [
         id, command.providerId, command.externalTransactionId, command.idempotencyKey, computePayloadHash(command),
         w.id, w.playerId, command.roundId, command.gameId, command.referenceExternalTransactionId,
@@ -165,11 +165,14 @@ describe('POST /wagering/transactions — erros (corpo { code, message, retryabl
     expectErrorBody(duplicate.body, 'DUPLICATE_EXTERNAL_TRANSACTION');
   });
 
-  test('501 NOT_SUPPORTED_YET para WIN com referência (até a Fase 5)', async () => {
+  test('202 PENDING_REFERENCE quando a referência ainda não chegou', async () => {
     const w = await wallet();
-    const response = await submitTransaction(t.baseUrl, wagerCommand(w, { kind: 'WIN', referenceExternalTransactionId: 'bet-1' }));
-    expect(response.status).toBe(501);
-    expectErrorBody(response.body, 'NOT_SUPPORTED_YET');
+    const response = await submitTransaction(
+      t.baseUrl,
+      wagerCommand(w, { kind: 'REFUND', referenceExternalTransactionId: `bet-${newId()}`, money: brl('10.00') }),
+    );
+    expect(response.status).toBe(202);
+    expect(response.body).toMatchObject({ status: 'PENDING_REFERENCE', balance: brl('100.00'), idempotentReplay: false });
   });
 });
 

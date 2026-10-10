@@ -38,3 +38,19 @@ export function wagerCommand(
     ...overrides,
   };
 }
+
+/** Comando que referencia outro (mesmo provider, wallet, player e rodada), ex.: REFUND de uma BET. */
+export function referencing(
+  reference: ProcessWagerTransactionCommand,
+  kind: 'WIN' | 'LOSS' | 'REFUND' | 'ROLLBACK',
+  overrides: Partial<ProcessWagerTransactionCommand> = {},
+): ProcessWagerTransactionCommand {
+  return {
+    ...wagerCommand(
+      { id: reference.walletId, playerId: reference.playerId },
+      { roundId: reference.roundId, money: reference.money, kind },
+    ),
+    referenceExternalTransactionId: reference.externalTransactionId,
+    ...overrides,
+  };
+}

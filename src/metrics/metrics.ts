@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Counter, Histogram, Registry } from 'prom-client';
+import { Counter, Gauge, Histogram, Registry } from 'prom-client';
 
 /**
  * Métricas Prometheus. Registry próprio (não o global do prom-client) para que vários apps
@@ -11,7 +11,7 @@ export class Metrics {
 
   readonly transactions = new Counter({
     name: 'wager_transactions_total',
-    help: 'Transações finalizadas, por kind e status',
+    help: 'Transações que chegaram a cada status (inclui PENDING_REFERENCE), por kind',
     labelNames: ['kind', 'status'] as const,
     registers: [this.registry],
   });
@@ -34,6 +34,19 @@ export class Metrics {
     name: 'idempotency_duplicates_total',
     help: 'Duplicatas detectadas: replay, conflito de Idempotency-Key ou externalTransactionId repetido',
     labelNames: ['type'] as const,
+    registers: [this.registry],
+  });
+
+  readonly pendingReferenceRetries = new Counter({
+    name: 'pending_reference_retries_total',
+    help: 'Reavaliações de transações em PENDING_REFERENCE, por resultado',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
+  readonly pendingReferences = new Gauge({
+    name: 'wager_transactions_pending_reference',
+    help: 'Transações aguardando referência (atualizado a cada ciclo do worker)',
     registers: [this.registry],
   });
 

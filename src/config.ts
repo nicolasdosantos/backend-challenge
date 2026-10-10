@@ -7,6 +7,15 @@ export interface AppConfig {
   /** Timeouts do lado do cliente: banco que não responde vira erro (HTTP 503) em vez de travar a requisição. */
   dbConnectTimeoutMs: number;
   dbQueryTimeoutMs: number;
+  pendingReference: {
+    /** Loop agendado que reavalia transações em PENDING_REFERENCE. */
+    workerEnabled: boolean;
+    pollIntervalMs: number;
+    /** Atraso da 1ª reavaliação; dobra a cada tentativa (2s, 4s, 8s, ...). */
+    baseDelayMs: number;
+    /** Reavaliações antes de desistir (6 → janela de ~2 min com base de 2s). */
+    maxAttempts: number;
+  };
   sqs: {
     endpoint: string | undefined;
     region: string;
@@ -29,6 +38,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     dbPoolMax: Number(env.DB_POOL_MAX ?? 10),
     dbConnectTimeoutMs: Number(env.DB_CONNECT_TIMEOUT_MS ?? 5000),
     dbQueryTimeoutMs: Number(env.DB_QUERY_TIMEOUT_MS ?? 10000),
+    pendingReference: {
+      workerEnabled: (env.PENDING_REFERENCE_WORKER_ENABLED ?? 'true') === 'true',
+      pollIntervalMs: Number(env.PENDING_REFERENCE_POLL_INTERVAL_MS ?? 1000),
+      baseDelayMs: Number(env.PENDING_REFERENCE_BASE_DELAY_MS ?? 2000),
+      maxAttempts: Number(env.PENDING_REFERENCE_MAX_ATTEMPTS ?? 6),
+    },
     sqs: {
       endpoint: env.SQS_ENDPOINT,
       region: env.AWS_REGION ?? 'us-east-1',

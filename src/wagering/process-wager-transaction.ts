@@ -1,13 +1,10 @@
 import { LockMode } from '@mikro-orm/core';
 import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { DuplicateExternalTransactionError, IdempotencyKeyConflictError, WalletNotFoundError } from '../application-errors';
+import { APP_CONFIG, type AppConfig } from '../config';
 import {
-  DuplicateExternalTransactionError,
-  IdempotencyKeyConflictError,
-  NotSupportedYetError,
-  WalletNotFoundError,
-} from '../application-errors';
-import {
+  copyTransactionState,
   copyWalletState,
   ledgerEntryToRecord,
   outboxToRecord,
@@ -19,6 +16,7 @@ import { WagerTransactionRecord, WalletRecord } from '../database/records';
 import { FailureCode } from '../domain/failure-code';
 import { isUuid } from '../domain/id';
 import {
+  WagerTransactionPendingReference,
   WagerTransactionProcessed,
   WagerTransactionRejected,
   WalletBalanceChanged,
@@ -27,15 +25,12 @@ import {
 } from '../domain/integration-events';
 import { Money, type MoneyProps } from '../domain/money';
 import { OutboxMessage } from '../domain/outbox-message';
-import {
-  WagerTransaction,
-  WagerTransactionKind,
-  WagerTransactionStatus,
-} from '../domain/wager-transaction';
+import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from '../domain/wager-transaction';
 import type { Wallet } from '../domain/wallet';
-import type { WalletLedgerEntry } from '../domain/wallet-ledger-entry';
+import { LedgerDirection, type WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import { Metrics } from '../metrics/metrics';
 import { computePayloadHash, type WagerPayload } from './payload-hash';
+import { nextReferenceAttemptAt, referenceRetriesExhausted, type ReferenceRetryPolicy } from './reference-retry-policy';
 
 /** Entrada independente de transporte: usada pela API HTTP e pelo consumidor SQS (Fase 6). */
 export interface ProcessWagerTransactionCommand extends WagerPayload {
@@ -52,14 +47,29 @@ export interface WagerTransactionResult {
   idempotentReplay: boolean;
 }
 
+/** Resultado do reprocessamento de uma transação em PENDING_REFERENCE. */
+export type PendingReferenceOutcome = 'processed' | 'rejected' | 'still_pending' | 'skipped';
+
+/**
+ * Resultado da avaliação. `pending`: a referência ainda não existe (`missing`) ou existe mas
+ * não terminou de processar (`unfinished`); a transação não foi alterada.
+ */
+type Evaluation =
+  | { pending: false; ledgerEntry?: WalletLedgerEntry }
+  | { pending: true; waitingOn: 'missing' | 'unfinished' };
+
 @Injectable()
 export class ProcessWagerTransaction {
   private readonly logger = new Logger(ProcessWagerTransaction.name);
+  private readonly retryPolicy: ReferenceRetryPolicy;
 
   constructor(
     private readonly orm: MikroORM,
     private readonly metrics: Metrics,
-  ) {}
+    @Inject(APP_CONFIG) config: AppConfig,
+  ) {
+    this.retryPolicy = config.pendingReference;
+  }
 
   async execute(command: ProcessWagerTransactionCommand): Promise<WagerTransactionResult> {
     const stopTimer = this.metrics.processingSeconds.startTimer({ kind: command.kind });
@@ -80,20 +90,19 @@ export class ProcessWagerTransaction {
       // 1. Lock da wallet: serializa todas as operações desta wallet, em qualquer instância.
       const walletRecord = await this.lockWallet(em, command.walletId);
 
-      // 2. A chave já foi usada? (caminho normal de replay/conflito: a linha já está commitada)
+      // 2. A chave já foi usada? Replay (estado atual) ou conflito.
       const existing = await em.findOne(WagerTransactionRecord, { idempotencyKey: command.idempotencyKey });
       if (existing) {
         return this.replayOrConflict(existing, transaction, walletRecord);
       }
 
-      if (transaction.referenceExternalTransactionId !== undefined) {
-        throw new NotSupportedYetError(`${transaction.kind} with reference is not supported yet (resolution arrives in phase 5)`);
-      }
-
-      // 3. Decide em memória (o agregado ainda não foi persistido).
+      // 3. Decide em memória: só leituras (referência), nenhuma escrita ainda.
       const wallet = walletToDomain(walletRecord);
       const at = new Date();
-      const ledgerEntry = this.apply(wallet, transaction, at);
+      const evaluation = await this.evaluate(em, wallet, transaction, at);
+      if (evaluation.pending) {
+        transaction.markPendingReference(nextReferenceAttemptAt(this.retryPolicy, 0, at));
+      }
 
       // 4. Grava a transação ANTES de qualquer mudança de saldo. Se a chave (ou o external id)
       //    foi gravada por outra transação concorrente, nada é inserido e nada mais é escrito.
@@ -102,13 +111,11 @@ export class ProcessWagerTransaction {
       }
 
       // 5. Só agora: lançamento, saldo/version e eventos na outbox, na mesma transação SQL.
-      if (ledgerEntry) {
-        em.persist(ledgerEntryToRecord(ledgerEntry));
-        copyWalletState(wallet, walletRecord);
-      }
-      for (const event of this.eventsFor(wallet, transaction, ledgerEntry, command, at)) {
-        em.persist(outboxToRecord(OutboxMessage.enqueue(event)));
-      }
+      this.persistEffects(em, wallet, walletRecord, transaction, evaluation, {
+        correlationId: command.correlationId,
+        causationId: command.causationId,
+        at,
+      });
       await em.flush();
       await this.beforeCommit(em);
 
@@ -134,6 +141,77 @@ export class ProcessWagerTransaction {
   }
 
   /**
+   * Reavalia uma transação em PENDING_REFERENCE (chamado pelo worker). Mesma ordem de locks do
+   * caminho principal: wallet (FOR UPDATE) e só então a transação, que é RELIDA dentro do lock.
+   * Se outro worker/instância já a resolveu ou reagendou, não faz nada ('skipped').
+   */
+  async retryPendingReference(transactionId: string, walletId: string): Promise<PendingReferenceOutcome> {
+    const outcome = await this.orm.em.fork().transactional(async (em): Promise<{
+      outcome: PendingReferenceOutcome;
+      transaction?: WagerTransaction;
+    }> => {
+      const walletRecord = await this.lockWallet(em, walletId);
+      const record = await em.findOne(WagerTransactionRecord, { id: transactionId });
+      const now = new Date();
+      if (
+        !record ||
+        record.status !== WagerTransactionStatus.PendingReference ||
+        !record.nextReferenceAttemptAt ||
+        record.nextReferenceAttemptAt > now
+      ) {
+        return { outcome: 'skipped' };
+      }
+
+      const wallet = walletToDomain(walletRecord);
+      const transaction = transactionToDomain(record, wallet.currency);
+      const evaluation = await this.evaluate(em, wallet, transaction, now);
+
+      let outcome: PendingReferenceOutcome;
+      if (!evaluation.pending) {
+        outcome = transaction.status === WagerTransactionStatus.Processed ? 'processed' : 'rejected';
+      } else if (referenceRetriesExhausted(this.retryPolicy, transaction.referenceAttempts)) {
+        const code = evaluation.waitingOn === 'missing' ? FailureCode.ReferenceNotFound : FailureCode.ReferenceNotProcessed;
+        transaction.reject(code, now, wallet.balance);
+        outcome = 'rejected';
+      } else {
+        transaction.scheduleReferenceRetry(
+          nextReferenceAttemptAt(this.retryPolicy, transaction.referenceAttempts + 1, now),
+        );
+        outcome = 'still_pending';
+      }
+
+      copyTransactionState(transaction, record);
+      if (outcome !== 'still_pending') {
+        const resolved: Evaluation = evaluation.pending ? { pending: false } : evaluation;
+        // Sem a requisição original, a transação é o próprio identificador de rastreio.
+        this.persistEffects(em, wallet, walletRecord, transaction, resolved, {
+          correlationId: transaction.id,
+          causationId: transaction.id,
+          at: now,
+        });
+      }
+      await em.flush();
+      return { outcome, transaction };
+    });
+
+    this.metrics.pendingReferenceRetries.inc({ outcome: outcome.outcome });
+    if (outcome.transaction && (outcome.outcome === 'processed' || outcome.outcome === 'rejected')) {
+      this.metrics.transactions.inc({ kind: outcome.transaction.kind, status: outcome.transaction.status });
+    }
+    if (outcome.outcome !== 'skipped') {
+      this.logger.log({
+        message: 'pending reference re-evaluated',
+        correlationId: transactionId,
+        transactionId,
+        walletId,
+        outcome: outcome.outcome,
+        failureCode: outcome.transaction?.failureCode,
+      });
+    }
+    return outcome.outcome;
+  }
+
+  /**
    * SELECT ... FOR UPDATE na linha da wallet: serializa só as operações desta wallet.
    * Primeiro tenta com SKIP LOCKED para saber, sem erro e sem abortar a transação, se outra
    * transação já segura o lock; nesse caso conta um conflito e espera com FOR UPDATE normal.
@@ -151,7 +229,114 @@ export class ProcessWagerTransaction {
     return locked;
   }
 
-  /** Mesmo hash → resultado original (replay). Hash diferente → 409, nunca replay. */
+  /**
+   * Regras de negócio. Rejeição NÃO é exceção: a transação termina REJECTED e é gravada (com
+   * commit) para ficar auditável; nesse caso não há lançamento nem mudança de saldo.
+   * Só faz leituras no banco; o efeito fica no agregado em memória até o chamador persistir.
+   */
+  private async evaluate(em: EntityManager, wallet: Wallet, transaction: WagerTransaction, at: Date): Promise<Evaluation> {
+    const reject = (code: FailureCode): Evaluation => {
+      transaction.reject(code, at, wallet.balance);
+      return { pending: false };
+    };
+    if (transaction.playerId !== wallet.playerId) {
+      return reject(FailureCode.PlayerMismatch);
+    }
+    if (transaction.money.currency !== wallet.currency) {
+      return reject(FailureCode.CurrencyMismatch);
+    }
+
+    // Referência (WIN/LOSS opcional, REFUND/ROLLBACK obrigatória): resolvida por (providerId, externalTransactionId).
+    let reference: WagerTransaction | undefined;
+    if (transaction.referenceExternalTransactionId !== undefined) {
+      const referenceRecord = await em.findOne(WagerTransactionRecord, {
+        providerId: transaction.providerId,
+        externalTransactionId: transaction.referenceExternalTransactionId,
+      });
+      if (!referenceRecord) {
+        return { pending: true, waitingOn: 'missing' };
+      }
+      reference = transactionToDomain(referenceRecord, wallet.currency);
+      const check = transaction.checkReference(reference);
+      if (check.outcome === 'wait') {
+        return { pending: true, waitingOn: 'unfinished' };
+      }
+      if (check.outcome === 'invalid') {
+        return reject(check.failureCode);
+      }
+      // Regra estrita: uma referência aceita UMA reversão processada. Checado aqui, dentro do lock
+      // da wallet (a referência é da mesma wallet); o índice único parcial é a última barreira.
+      if (transaction.isReversal() && (await this.isAlreadyReversed(em, reference.id))) {
+        return reject(FailureCode.AlreadyReversed);
+      }
+    }
+
+    const movement = { transactionId: transaction.id, at };
+    let ledgerEntry: WalletLedgerEntry | undefined;
+    const direction = transaction.affectsBalance() ? transaction.ledgerDirectionFor(reference) : undefined;
+    if (direction === LedgerDirection.Debit) {
+      if (!wallet.canDebit(transaction.money)) {
+        return reject(
+          transaction.kind === WagerTransactionKind.Bet ? FailureCode.InsufficientFunds : FailureCode.ReversalInsufficientFunds,
+        );
+      }
+      ledgerEntry = wallet.debit(transaction.money, movement);
+    } else if (direction === LedgerDirection.Credit) {
+      ledgerEntry = wallet.credit(transaction.money, movement);
+    }
+    transaction.markProcessed(reference?.id, at, wallet.balance);
+    return { pending: false, ledgerEntry };
+  }
+
+  private async isAlreadyReversed(em: EntityManager, referenceTransactionId: string): Promise<boolean> {
+    const reversals = await em.count(WagerTransactionRecord, {
+      referenceTransactionId,
+      kind: { $in: [WagerTransactionKind.Refund, WagerTransactionKind.Rollback] },
+      status: WagerTransactionStatus.Processed,
+    });
+    return reversals > 0;
+  }
+
+  /** Lançamento, saldo/version e eventos na outbox (a transação em si já foi gravada pelo chamador). */
+  private persistEffects(
+    em: EntityManager,
+    wallet: Wallet,
+    walletRecord: WalletRecord,
+    transaction: WagerTransaction,
+    evaluation: Evaluation,
+    ctx: EventContext,
+  ): void {
+    const ledgerEntry = evaluation.pending ? undefined : evaluation.ledgerEntry;
+    if (ledgerEntry) {
+      em.persist(ledgerEntryToRecord(ledgerEntry));
+      copyWalletState(wallet, walletRecord); // saldo e version só mudam quando há lançamento
+    }
+    for (const event of this.eventsFor(wallet, transaction, ledgerEntry, ctx)) {
+      em.persist(outboxToRecord(OutboxMessage.enqueue(event)));
+    }
+  }
+
+  private eventsFor(
+    wallet: Wallet,
+    transaction: WagerTransaction,
+    entry: WalletLedgerEntry | undefined,
+    ctx: EventContext,
+  ): IntegrationEvent<unknown>[] {
+    switch (transaction.status) {
+      case WagerTransactionStatus.Rejected:
+        return [WagerTransactionRejected.from(transaction, ctx)];
+      case WagerTransactionStatus.PendingReference:
+        return [WagerTransactionPendingReference.from(transaction, ctx)];
+      case WagerTransactionStatus.Processed:
+        return entry
+          ? [WagerTransactionProcessed.from(transaction, ctx), WalletBalanceChanged.from(wallet, entry, ctx)]
+          : [WagerTransactionProcessed.from(transaction, ctx)];
+      default:
+        return [];
+    }
+  }
+
+  /** Mesmo hash → resultado original/atual (replay). Hash diferente → 409, nunca replay. */
   private replayOrConflict(
     existing: WagerTransactionRecord,
     incoming: WagerTransaction,
@@ -199,74 +384,21 @@ export class ProcessWagerTransaction {
       `insert into wager_transactions (
          id, provider_id, external_transaction_id, idempotency_key, payload_hash, wallet_id, player_id,
          round_id, game_id, kind, amount, currency, reference_external_transaction_id,
-         reference_transaction_id, status, failure_code, result_balance, created_at, processed_at)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         reference_transaction_id, status, failure_code, result_balance, created_at, processed_at,
+         reference_attempts, next_reference_attempt_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        on conflict do nothing
        returning id`,
       [
         r.id, r.providerId, r.externalTransactionId, r.idempotencyKey, r.payloadHash, r.walletId, r.playerId,
         r.roundId, r.gameId, r.kind, r.amount, r.currency, r.referenceExternalTransactionId,
         r.referenceTransactionId, r.status, r.failureCode, r.resultBalance, r.createdAt, r.processedAt,
+        r.referenceAttempts, r.nextReferenceAttemptAt,
       ],
       'all',
       em.getTransactionContext(),
     );
     return rows.length === 1;
-  }
-
-  /**
-   * Regras de negócio, só em memória. Rejeição NÃO é exceção: a transação termina REJECTED e
-   * é gravada (com commit) para ficar auditável; nesse caso não há lançamento nem mudança de saldo.
-   */
-  private apply(wallet: Wallet, transaction: WagerTransaction, at: Date): WalletLedgerEntry | undefined {
-    if (transaction.playerId !== wallet.playerId) {
-      transaction.reject(FailureCode.PlayerMismatch, at, wallet.balance);
-      return undefined;
-    }
-    if (transaction.money.currency !== wallet.currency) {
-      transaction.reject(FailureCode.CurrencyMismatch, at, wallet.balance);
-      return undefined;
-    }
-
-    const movement = { transactionId: transaction.id, at };
-    let entry: WalletLedgerEntry | undefined;
-    switch (transaction.kind) {
-      case WagerTransactionKind.Bet:
-        if (!wallet.canDebit(transaction.money)) {
-          transaction.reject(FailureCode.InsufficientFunds, at, wallet.balance);
-          return undefined;
-        }
-        entry = wallet.debit(transaction.money, movement);
-        break;
-      case WagerTransactionKind.Win:
-        entry = wallet.credit(transaction.money, movement);
-        break;
-      case WagerTransactionKind.Loss:
-        entry = undefined;
-        break;
-      default:
-        throw new NotSupportedYetError(`${transaction.kind} is not supported yet`);
-    }
-    transaction.markProcessed(undefined, at, wallet.balance);
-    return entry;
-  }
-
-  private eventsFor(
-    wallet: Wallet,
-    transaction: WagerTransaction,
-    entry: WalletLedgerEntry | undefined,
-    command: ProcessWagerTransactionCommand,
-    at: Date,
-  ): IntegrationEvent<unknown>[] {
-    const ctx: EventContext = { correlationId: command.correlationId, causationId: command.causationId, at };
-    if (transaction.status === WagerTransactionStatus.Rejected) {
-      return [WagerTransactionRejected.from(transaction, ctx)];
-    }
-    const events: IntegrationEvent<unknown>[] = [WagerTransactionProcessed.from(transaction, ctx)];
-    if (entry) {
-      events.push(WalletBalanceChanged.from(wallet, entry, ctx));
-    }
-    return events;
   }
 
   /** `currentBalance` só é usado quando a transação ainda não terminou (PENDING_REFERENCE): estado atual. */

@@ -3,6 +3,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import type { INestApplication, LoggerService } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../../src/app.module';
+import type { AppConfig } from '../../src/config';
 import { Metrics } from '../../src/metrics/metrics';
 import { testDatabaseUrl, testSqsOptions } from './test-env';
 
@@ -43,6 +44,9 @@ export interface TestAppOptions {
   queuePrefix?: string;
   databaseUrl?: string;
   dbQueryTimeoutMs?: number;
+  dbPoolMax?: number;
+  dbConnectTimeoutMs?: number;
+  pendingReference?: Partial<AppConfig['pendingReference']>;
 }
 
 export async function createTestApp(options: TestAppOptions = {}): Promise<TestApp> {
@@ -51,9 +55,11 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
     AppModule.forRoot({
       port: 0,
       databaseUrl: options.databaseUrl ?? testDatabaseUrl(),
-      dbPoolMax: TEST_POOL_MAX,
-      dbConnectTimeoutMs: 5000,
+      dbPoolMax: options.dbPoolMax ?? TEST_POOL_MAX,
+      dbConnectTimeoutMs: options.dbConnectTimeoutMs ?? 5000,
       dbQueryTimeoutMs: options.dbQueryTimeoutMs ?? 10000,
+      // Nos testes o loop automático fica desligado (os testes chamam processDue) e o backoff é curto.
+      pendingReference: { workerEnabled: false, pollIntervalMs: 50, baseDelayMs: 20, maxAttempts: 3, ...options.pendingReference },
       sqs: { ...testSqsOptions(), queuePrefix: options.queuePrefix ?? '' },
     }),
     { logger },
