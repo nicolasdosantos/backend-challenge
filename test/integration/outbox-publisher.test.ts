@@ -1,5 +1,5 @@
 import { CreateQueueCommand, DeleteQueueCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { MikroORM } from '@mikro-orm/postgresql';
+import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { APP_CONFIG, type AppConfig } from '../../src/config';
 import { newId } from '../../src/domain/id';
@@ -38,6 +38,47 @@ async function publishAll(p: OutboxPublisher = publisher) {
     if ((await p.publishOnce()).published === 0) return;
   }
 }
+
+/** Para a transação de negócio depois de todas as escritas (inclusive a outbox) e antes do commit. */
+class PausingBeforeCommit extends ProcessWagerTransaction {
+  private release!: () => void;
+  private readonly gate = new Promise<void>((resolve) => (this.release = resolve));
+  private reached!: () => void;
+  readonly reachedCommit = new Promise<void>((resolve) => (this.reached = resolve));
+
+  letCommit() {
+    this.release();
+  }
+
+  protected override async beforeCommit(_em: EntityManager): Promise<void> {
+    this.reached();
+    await this.gate;
+  }
+}
+
+describe('eliminatório: nenhum evento publicado antes do commit', () => {
+  test('com a transação de negócio parada antes do commit, o publisher não publica nada dela; depois do commit, publica', async () => {
+    const w = await openWallet(t, '100.00');
+    touched.push(w.id);
+    await publishAll();
+    await drain(q, q.urls.walletEvents, 0); // eventos da abertura fora do caminho
+
+    const pausing = new PausingBeforeCommit(t.orm, t.metrics, t.app.get<AppConfig>(APP_CONFIG));
+    const run = pausing.execute(wagerCommand(w, { money: brl('10.00') }));
+    await pausing.reachedCommit; // transação, ledger, saldo e 2 eventos já escritos, mas sem commit
+
+    await publisher.publishOnce();
+    expect(await unpublishedFor(t.orm, [w.id])).toBe(0); // as linhas não commitadas nem são visíveis
+    expect((await drain(q, q.urls.walletEvents, 0)).length).toBe(0);
+
+    pausing.letCommit();
+    await run;
+    expect(await unpublishedFor(t.orm, [w.id])).toBe(2);
+    await publishAll();
+    const delivered = (await drain(q, q.urls.walletEvents)).map((m) => JSON.parse(m.Body ?? '{}').eventType);
+    expect(delivered.sort()).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged']);
+  });
+});
 
 describe('publicação da outbox', () => {
   test('os 4 tipos de evento chegam na fila com version, dinheiro em string decimal e aggregateId = walletId', async () => {
