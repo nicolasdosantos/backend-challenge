@@ -21,7 +21,7 @@ import { isTransientInfrastructureError } from '../infrastructure-errors';
 import { Metrics } from '../metrics/metrics';
 import { resolveQueueUrls, SQS_CLIENT, type QueueUrls } from '../sqs/sqs';
 import { DUPLICATE_DELIVERY, ProcessWagerTransaction } from '../wagering/process-wager-transaction';
-import { InvalidMessageError, parseWagerMessage, type DeadLetterReason } from './wager-message';
+import { InvalidMessageError, parseWagerMessage, type DeadLetterReason, type WagerMessage } from './wager-message';
 
 export const CONSUMER_NAME = 'wager-transactions-consumer';
 
@@ -56,7 +56,8 @@ function describe(error: unknown): string {
  * - negócio (REJECTED, PENDING_REFERENCE, replay, redelivery): terminal → ack;
  * - transitório (banco/SQS indisponível, timeout, deadlock): sem ack, ChangeMessageVisibility com backoff;
  *   a redrive policy (maxReceiveCount) leva à DLQ quem esgotar as tentativas;
- * - permanente (mensagem/payload inválido, wallet inexistente, conflitos): envia à DLQ e só então apaga.
+ * - permanente (mensagem/payload inválido, wallet inexistente, conflitos): envia à DLQ e só então apaga;
+ * - inesperado (bug): retry; na última tentativa grava a transação FAILED e envia à DLQ.
  */
 @Injectable()
 export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
@@ -142,10 +143,9 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
   private async handle(queues: QueueUrls, message: Message): Promise<ConsumeOutcome> {
     const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? '1');
     let outcome: ConsumeOutcome;
-    let messageId: string | undefined;
+    let parsed: WagerMessage | undefined;
     try {
-      const parsed = parseWagerMessage(message.Body ?? '');
-      messageId = parsed.messageId;
+      parsed = parseWagerMessage(message.Body ?? '');
       const result = await this.processWagerTransaction.executeFromMessage(parsed.command, {
         consumerName: CONSUMER_NAME,
         messageId: parsed.messageId,
@@ -154,10 +154,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
       this.crashIfFaultInjected(parsed.messageId);
       outcome = result === DUPLICATE_DELIVERY ? 'duplicate_delivery' : result.idempotentReplay ? 'replay' : this.toOutcome(result.status);
     } catch (error) {
-      const reason = deadLetterReason(error);
-      outcome = reason
-        ? await this.deadLetter(queues, message, messageId, reason, error)
-        : await this.retryLater(queues, message, messageId, receiveCount, error);
+      outcome = await this.handleFailure(queues, message, parsed, receiveCount, error);
       this.metrics.messagesConsumed.inc({ outcome });
       return outcome;
     }
@@ -166,10 +163,38 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
       await this.sqs.send(new DeleteMessageCommand({ QueueUrl: queues.wagerTransactions, ReceiptHandle: message.ReceiptHandle }));
     } catch (error) {
       // Commit feito, ack falhou: a mensagem volta depois do visibility timeout e a inbox a reconhece.
-      this.logger.warn({ message: 'ack failed after commit', messageId, reason: describe(error) });
+      this.logger.warn({ message: 'ack failed after commit', messageId: parsed.messageId, reason: describe(error) });
     }
     this.metrics.messagesConsumed.inc({ outcome });
     return outcome;
+  }
+
+  /**
+   * Permanente → DLQ. Transitório → retry com backoff (a redrive policy leva à DLQ quem esgotar).
+   * Inesperado → retry; na última tentativa, grava a transação como FAILED e manda à DLQ.
+   */
+  private async handleFailure(
+    queues: QueueUrls,
+    message: Message,
+    parsed: WagerMessage | undefined,
+    receiveCount: number,
+    error: unknown,
+  ): Promise<ConsumeOutcome> {
+    const messageId = parsed?.messageId;
+    const reason = deadLetterReason(error);
+    if (reason) {
+      return this.deadLetter(queues, message, messageId, reason, error);
+    }
+    const lastAttempt = receiveCount >= this.config.consumer.maxReceiveCount;
+    if (lastAttempt && parsed && !isTransientInfrastructureError(error)) {
+      try {
+        await this.processWagerTransaction.recordFailure(parsed.command);
+      } catch (recordError) {
+        this.logger.warn({ message: 'could not record FAILED transaction', messageId, reason: describe(recordError) });
+      }
+      return this.deadLetter(queues, message, messageId, 'PROCESSING_FAILED', error);
+    }
+    return this.retryLater(queues, message, messageId, receiveCount, error);
   }
 
   private toOutcome(status: WagerTransactionStatus): ConsumeOutcome {

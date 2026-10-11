@@ -25,6 +25,8 @@ export interface AppConfig {
     /** Backoff de erro transitório (segundos): base × 2^(receiveCount-1), limitado ao máximo. */
     retryBaseDelaySeconds: number;
     retryMaxDelaySeconds: number;
+    /** Igual ao maxReceiveCount da redrive policy: identifica a última tentativa antes da DLQ. */
+    maxReceiveCount: number;
     /** No SIGTERM, quanto esperar a mensagem em andamento antes de seguir com o shutdown. */
     shutdownTimeoutMs: number;
     /** RECURSO DE TESTE: encerra o processo logo após o commit e antes do ack (FAULT_CRASH_AFTER_COMMIT=1). */
@@ -71,6 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       visibilityTimeoutSeconds: Number(env.SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS ?? 30),
       retryBaseDelaySeconds: Number(env.SQS_CONSUMER_RETRY_BASE_DELAY_SECONDS ?? 2),
       retryMaxDelaySeconds: Number(env.SQS_CONSUMER_RETRY_MAX_DELAY_SECONDS ?? 60),
+      maxReceiveCount: Number(env.SQS_CONSUMER_MAX_RECEIVE_COUNT ?? 5),
       shutdownTimeoutMs: Number(env.SQS_CONSUMER_SHUTDOWN_TIMEOUT_MS ?? 10000),
       crashAfterCommit: env.FAULT_CRASH_AFTER_COMMIT === '1',
     },

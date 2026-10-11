@@ -13,7 +13,8 @@ export type DeadLetterReason =
   | 'WALLET_NOT_FOUND'
   | 'IDEMPOTENCY_KEY_CONFLICT'
   | 'DUPLICATE_EXTERNAL_TRANSACTION'
-  | 'INBOX_PAYLOAD_CONFLICT';
+  | 'INBOX_PAYLOAD_CONFLICT'
+  | 'PROCESSING_FAILED';
 
 /** Mensagem que nunca vai poder ser processada como está (erro permanente → DLQ). */
 export class InvalidMessageError extends Error {

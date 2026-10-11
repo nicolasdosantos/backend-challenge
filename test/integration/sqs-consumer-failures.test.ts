@@ -1,6 +1,9 @@
 import { ReceiveMessageCommand } from '@aws-sdk/client-sqs';
+import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { APP_CONFIG, type AppConfig } from '../../src/config';
 import { WagerTransactionConsumer, type ConsumeOutcome } from '../../src/messaging/wager-transaction.consumer';
+import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import { createTestApp, type TestApp } from '../support/app';
 import { countRows, expectLedgerConsistent } from '../support/invariants';
 import { createTestQueues, drain, queueDepth, sendWagerMessage, waitFor, type TestQueues } from '../support/sqs';
@@ -33,6 +36,7 @@ beforeAll(async () => {
     databaseUrl: viaProxy.toString(),
     dbQueryTimeoutMs: 1500,
     dbConnectTimeoutMs: 1500,
+    consumer: { maxReceiveCount: MAX_RECEIVE_COUNT },
   });
   consumer = t.app.get(WagerTransactionConsumer);
 });
@@ -52,6 +56,13 @@ async function pollUntil(predicate: (outcomes: ConsumeOutcome[]) => boolean, max
     if (predicate(outcomes)) return seen;
   }
   throw new Error(`condition not reached; outcomes: ${seen.join(',')}`);
+}
+
+/** Caso de uso com um "bug": erro comum (não transitório) antes do commit. */
+class BuggyProcessWagerTransaction extends ProcessWagerTransaction {
+  protected override async beforeCommit(_em: EntityManager): Promise<void> {
+    throw new TypeError('simulated bug');
+  }
 }
 
 describe('erros transitórios no consumidor', () => {
@@ -125,4 +136,45 @@ describe('erros transitórios no consumidor', () => {
     await waitFor(async () => (await fetch(`${t.baseUrl}/health/ready`)).status === 200, 10_000, 'app ready');
     expect(await countRows(t.orm, `select 1 from wager_transactions where idempotency_key = ?`, [command.idempotencyKey])).toBe(0);
   }, 40_000);
+});
+
+describe('erro inesperado e não recuperável', () => {
+  test('é retentado; na última tentativa a transação é gravada FAILED (INTERNAL_ERROR) e a mensagem vai à DLQ', async () => {
+    const w = await openWallet(t, '100.00');
+    touched.push(w.id);
+    const command = wagerCommand(w, { money: { amount: '7.00', currency: 'BRL' } });
+    const config = t.app.get<AppConfig>(APP_CONFIG);
+    const buggy = new WagerTransactionConsumer(
+      new BuggyProcessWagerTransaction(t.orm, t.metrics, config),
+      t.metrics,
+      q.sqs,
+      config,
+    );
+    const messageId = await sendWagerMessage(q, command);
+
+    expect(await buggy.pollOnce()).toEqual(['retry']); // 1ª tentativa: retry com backoff (1s)
+    // Atomicidade com a inbox: a falha antes do commit desfez inbox, transação, saldo, ledger e outbox juntos.
+    expect(await countRows(t.orm, `select 1 from inbox_messages where message_id = ?`, [messageId])).toBe(0);
+    expect(await countRows(t.orm, `select 1 from wager_transactions where idempotency_key = ?`, [command.idempotencyKey])).toBe(0);
+    expect(await countRows(t.orm, `select 1 from outbox_messages where aggregate_id = ?`, [w.id])).toBe(2); // só os 2 eventos da abertura
+    const outcomes: ConsumeOutcome[] = [];
+    await waitFor(
+      async () => {
+        outcomes.push(...(await buggy.pollOnce()));
+        return outcomes.length > 0;
+      },
+      10_000,
+      'second delivery',
+    );
+    expect(outcomes).toEqual(['dead_letter']); // 2ª = última (maxReceiveCount 2)
+
+    const [row] = await t.orm.em
+      .getConnection()
+      .execute(`select status, failure_code, result_balance from wager_transactions where idempotency_key = ?`, [command.idempotencyKey]);
+    expect(row).toEqual({ status: 'FAILED', failure_code: 'INTERNAL_ERROR', result_balance: null });
+    expect(await countRows(t.orm, `select 1 from wallet_ledger_entries where wallet_id = ? and direction = 'DEBIT'`, [w.id])).toBe(0);
+    const dead = await drain(q, q.urls.wagerTransactionsDlq);
+    expect(dead.map((m) => m.MessageAttributes?.reason?.StringValue)).toEqual(['PROCESSING_FAILED']);
+    expect(await queueDepth(q, q.urls.wagerTransactions)).toBe(0);
+  }, 30_000);
 });
