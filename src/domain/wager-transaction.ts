@@ -1,3 +1,7 @@
+// Agregado WagerTransaction: uma operação do provedor (BET, WIN, LOSS, REFUND, ROLLBACK) ou a abertura
+// interna da wallet (OPENING). Concentra a validação na criação, as transições de status e a checagem
+// da transação referenciada.
+
 import { InvalidTransactionStateError, InvalidWagerTransactionError } from './errors';
 import { FailureCode } from './failure-code';
 import { newId } from './id';
@@ -149,6 +153,7 @@ export class WagerTransaction {
     });
   }
 
+  /** Reconstrói a partir do banco. Não revalida regras nem transições: o estado já foi aceito antes. */
   static rehydrate(state: WagerTransactionState): WagerTransaction {
     return new WagerTransaction(
       state.id,
@@ -211,6 +216,7 @@ export class WagerTransaction {
   // PENDING_REFERENCE -> PENDING_REFERENCE (nova tentativa agendada) | PROCESSED | REJECTED | FAILED
   // PROCESSED, REJECTED e FAILED são terminais.
 
+  /** Transação aplicada. `resultBalance` é o saldo logo depois dela, devolvido igual nos replays. */
   markProcessed(referenceTransactionId: string | undefined, at: Date, resultBalance: Money): void {
     this.assertNotTerminal('markProcessed');
     if (this.requiresReference() && !referenceTransactionId) {
@@ -223,6 +229,7 @@ export class WagerTransaction {
     this._nextReferenceAttemptAt = undefined;
   }
 
+  /** A referência ainda não existe (ou ainda não terminou): fica aguardando o worker, a partir de `nextAttemptAt`. */
   markPendingReference(nextAttemptAt: Date): void {
     if (this._status !== WagerTransactionStatus.Pending) {
       throw new InvalidTransactionStateError(`Cannot move ${this._status} to PENDING_REFERENCE`);
@@ -243,6 +250,7 @@ export class WagerTransaction {
     this._nextReferenceAttemptAt = nextAttemptAt;
   }
 
+  /** Rejeição de negócio: guarda o motivo e o saldo (que não mudou) observado naquele momento. */
   reject(code: FailureCode, at: Date, resultBalance: Money): void {
     this.assertNotTerminal('reject');
     this._status = WagerTransactionStatus.Rejected;
@@ -252,6 +260,7 @@ export class WagerTransaction {
     this._nextReferenceAttemptAt = undefined;
   }
 
+  /** Falha inesperada que persistiu até a última tentativa do consumidor. Sem saldo resultante. */
   fail(code: FailureCode, at: Date): void {
     this.assertNotTerminal('fail');
     this._status = WagerTransactionStatus.Failed;
@@ -266,6 +275,7 @@ export class WagerTransaction {
     return TERMINAL_STATUSES.includes(this._status);
   }
 
+  /** LOSS é o único kind que nunca mexe no saldo (só registra o resultado da rodada). */
   affectsBalance(): boolean {
     return this.kind !== WagerTransactionKind.Loss;
   }
@@ -274,10 +284,12 @@ export class WagerTransaction {
     return this.kind === WagerTransactionKind.Refund || this.kind === WagerTransactionKind.Rollback;
   }
 
+  /** REFUND e ROLLBACK desfazem outra transação; é com isso que a regra de reversão única é aplicada. */
   isReversal(): boolean {
     return this.requiresReference();
   }
 
+  /** Mesmo hash = mesma requisição (replay). O caso de uso compara os hashes direto; aqui é a regra no domínio. */
   matchesPayload(payloadHash: string): boolean {
     return this.payloadHash === payloadHash;
   }
@@ -325,6 +337,7 @@ export class WagerTransaction {
     if (reference.status !== WagerTransactionStatus.Processed) {
       return { outcome: 'wait' };
     }
+    // Só reversões precisam ter o mesmo valor da referência (não existe reversão parcial); WIN pode ter qualquer valor.
     if (this.isReversal() && !reference.money.equals(this.money)) {
       return { outcome: 'invalid', failureCode: FailureCode.AmountMismatch };
     }

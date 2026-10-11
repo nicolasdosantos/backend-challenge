@@ -1,3 +1,6 @@
+// Erros do domínio. Na API viram 400 (INVALID_PAYLOAD) pelo HttpExceptionFilter; no consumidor SQS
+// levam a mensagem à DLQ com o motivo INVALID_PAYLOAD.
+
 /** Erros de domínio: violação de regra ou entrada inválida. Nunca indicam falha de infraestrutura. */
 export class DomainError extends Error {
   constructor(message: string) {
