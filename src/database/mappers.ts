@@ -1,7 +1,7 @@
 import type { FailureCode } from '../domain/failure-code';
-import { InboxMessage } from '../domain/inbox-message';
+import type { InboxMessage } from '../domain/inbox-message';
 import { Money } from '../domain/money';
-import { OutboxMessage } from '../domain/outbox-message';
+import type { OutboxMessage } from '../domain/outbox-message';
 import { WagerTransaction, type WagerTransactionKind, type WagerTransactionStatus } from '../domain/wager-transaction';
 import { Wallet } from '../domain/wallet';
 import { type LedgerDirection, WalletLedgerEntry } from '../domain/wallet-ledger-entry';
@@ -138,16 +138,6 @@ export function ledgerEntryToRecord(entry: WalletLedgerEntry): LedgerEntryRecord
 
 // ---- Inbox / Outbox
 
-export function inboxToDomain(record: InboxMessageRecord): InboxMessage {
-  return InboxMessage.rehydrate({
-    messageId: record.messageId,
-    consumerName: record.consumerName,
-    payloadHash: record.payloadHash,
-    at: record.receivedAt,
-    processedAt: record.processedAt ?? undefined,
-  });
-}
-
 export function inboxToRecord(message: InboxMessage): InboxMessageRecord {
   const record = new InboxMessageRecord();
   record.consumerName = message.consumerName;
@@ -156,19 +146,6 @@ export function inboxToRecord(message: InboxMessage): InboxMessageRecord {
   record.receivedAt = message.receivedAt;
   record.processedAt = message.processedAt ?? null;
   return record;
-}
-
-export function outboxToDomain(record: OutboxMessageRecord): OutboxMessage {
-  return OutboxMessage.rehydrate({
-    id: record.id,
-    aggregateId: record.aggregateId,
-    eventType: record.eventType,
-    payload: record.payload,
-    occurredAt: record.occurredAt,
-    attempts: record.attempts,
-    nextAttemptAt: record.nextAttemptAt ?? undefined,
-    publishedAt: record.publishedAt ?? undefined,
-  });
 }
 
 export function outboxToRecord(message: OutboxMessage): OutboxMessageRecord {
