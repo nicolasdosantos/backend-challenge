@@ -115,7 +115,6 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       }
       return counts;
     });
-    await this.updateLagGauge();
     return result;
   }
 
@@ -136,30 +135,24 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
    */
   protected async afterSend(_eventId: string): Promise<void> {}
 
-  private async updateLagGauge(): Promise<void> {
-    const [row] = await this.orm.em
-      .getConnection()
-      .execute<{ lag: string | null }[]>(
-        `select extract(epoch from (now() - min(occurred_at)))::text as lag from outbox_messages where published_at is null`,
-      );
-    this.metrics.outboxLagSeconds.set(row?.lag ? Number(row.lag) : 0);
-  }
-
-  private scheduleNext(): void {
+  /** Lote cheio indica que há mais pendentes: o próximo ciclo começa na hora, sem esperar o intervalo. */
+  private scheduleNext(delayMs = this.config.outbox.pollIntervalMs): void {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
-      this.currentRun = this.runOnce().finally(() => this.scheduleNext());
-    }, this.config.outbox.pollIntervalMs);
+      this.currentRun = this.runOnce().then((batchWasFull) => this.scheduleNext(batchWasFull ? 0 : undefined));
+    }, delayMs);
   }
 
-  private async runOnce(): Promise<void> {
+  private async runOnce(): Promise<boolean> {
     try {
-      await this.publishOnce();
+      const { published, failed } = await this.publishOnce();
+      return failed === 0 && published === this.config.outbox.batchSize;
     } catch (error) {
       this.logger.warn({
         message: 'outbox publisher cycle failed',
         reason: error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error',
       });
+      return false;
     }
   }
 

@@ -39,7 +39,7 @@ import { Metrics } from '../metrics/metrics';
 import { computePayloadHash, type WagerPayload } from './payload-hash';
 import { nextReferenceAttemptAt, referenceRetriesExhausted, type ReferenceRetryPolicy } from './reference-retry-policy';
 
-/** Entrada independente de transporte: usada pela API HTTP e pelo consumidor SQS (Fase 6). */
+/** Entrada independente de transporte: usada pela API HTTP e pelo consumidor SQS. */
 export interface ProcessWagerTransactionCommand extends WagerPayload {
   idempotencyKey: string;
   correlationId: string;
@@ -196,6 +196,39 @@ export class ProcessWagerTransaction {
       idempotentReplay: result.idempotentReplay,
     });
     return result;
+  }
+
+  /**
+   * Registra a transação como FAILED (INTERNAL_ERROR) quando o processamento falhou por um erro
+   * inesperado e não recuperável (o consumidor chama na última tentativa, antes de mandar à DLQ).
+   * Transação SQL separada, sem lançamento nem mudança de saldo: só deixa a falha auditável.
+   * Não grava nada se a wallet não existe ou se a chave já tem uma transação registrada.
+   */
+  async recordFailure(command: ProcessWagerTransactionCommand): Promise<string | undefined> {
+    const transaction = WagerTransaction.create({
+      ...command,
+      kind: command.kind as WagerTransactionKind,
+      money: Money.from(command.money),
+      payloadHash: computePayloadHash(command),
+    });
+    transaction.fail(FailureCode.InternalError, new Date());
+    const recorded = await this.orm.em.fork().transactional(async (em) => {
+      const wallet = await em.findOne(WalletRecord, { id: command.walletId });
+      return wallet !== null && (await this.insertTransaction(em, transaction));
+    });
+    if (!recorded) {
+      return undefined;
+    }
+    this.metrics.transactions.inc({ kind: transaction.kind, status: transaction.status });
+    this.logger.error({
+      message: 'wager transaction failed',
+      correlationId: command.correlationId,
+      transactionId: transaction.id,
+      walletId: command.walletId,
+      providerId: command.providerId,
+      failureCode: transaction.failureCode,
+    });
+    return transaction.id;
   }
 
   /** INSERT ... ON CONFLICT DO NOTHING na inbox, na transação corrente. */

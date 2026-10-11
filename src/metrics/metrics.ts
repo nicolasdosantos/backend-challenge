@@ -46,7 +46,7 @@ export class Metrics {
 
   readonly pendingReferences = new Gauge({
     name: 'wager_transactions_pending_reference',
-    help: 'Transações aguardando referência (atualizado a cada ciclo do worker)',
+    help: 'Transações aguardando referência (lido do banco no scrape; -1 se indisponível)',
     registers: [this.registry],
   });
 
@@ -70,6 +70,12 @@ export class Metrics {
     registers: [this.registry],
   });
 
+  readonly deadLetterQueueDepth = new Gauge({
+    name: 'sqs_dead_letter_queue_messages',
+    help: 'Mensagens na DLQ (inclui as movidas pela redrive policy), lido do SQS no momento do scrape; -1 se indisponível',
+    registers: [this.registry],
+  });
+
   readonly eventsPublished = new Counter({
     name: 'outbox_events_published_total',
     help: 'Eventos da outbox publicados na fila wallet-events',
@@ -85,7 +91,7 @@ export class Metrics {
 
   readonly outboxLagSeconds = new Gauge({
     name: 'outbox_lag_seconds',
-    help: 'Idade do evento não publicado mais antigo (0 se não há pendentes)',
+    help: 'Idade em segundos do evento não publicado mais antigo (lido do banco no scrape; 0 se não há pendentes, -1 se indisponível)',
     registers: [this.registry],
   });
 

@@ -70,6 +70,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
         visibilityTimeoutSeconds: 2,
         retryBaseDelaySeconds: 1,
         retryMaxDelaySeconds: 4,
+        maxReceiveCount: 5,
         shutdownTimeoutMs: 5000,
         crashAfterCommit: false,
         ...options.consumer,

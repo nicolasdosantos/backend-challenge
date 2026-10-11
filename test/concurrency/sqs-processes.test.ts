@@ -1,4 +1,4 @@
-import { ReceiveMessageCommand } from '@aws-sdk/client-sqs';
+import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
 import { LockMode } from '@mikro-orm/core';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { WalletRecord } from '../../src/database/records';
@@ -46,6 +46,13 @@ async function balance(walletId: string) {
   const [row] = await t.orm.em.getConnection().execute<{ balance: string }[]>(`select balance::text as balance from wallets where id = ?`, [walletId]);
   return row?.balance;
 }
+async function visibleMessages(): Promise<number> {
+  const { Attributes } = await q.sqs.send(
+    new GetQueueAttributesCommand({ QueueUrl: q.urls.wagerTransactions, AttributeNames: ['ApproximateNumberOfMessages'] }),
+  );
+  return Number(Attributes?.ApproximateNumberOfMessages ?? 0);
+}
+
 const debits = (walletId: string) =>
   countRows(t.orm, `select 1 from wallet_ledger_entries where wallet_id = ? and direction = 'DEBIT'`, [walletId]);
 
@@ -81,7 +88,7 @@ describe('cenário §13 #5: worker morto depois do commit e antes do ack', () =>
 });
 
 describe('SIGTERM com mensagem em andamento', () => {
-  test('a mensagem em andamento termina e é confirmada; as recebidas e não iniciadas voltam na hora', async () => {
+  test('a mensagem em andamento termina e é confirmada, o processo sai com 0 e as demais ficam visíveis na hora', async () => {
     const w = await openWallet(t, '100.00');
     touched.push(w.id);
     // 3 mensagens em grupos diferentes para chegarem no mesmo lote.
@@ -118,19 +125,17 @@ describe('SIGTERM com mensagem em andamento', () => {
     await holder;
     const exitCode = await instance.process.exited;
 
-    expect(instance.output()).toContain('shutting down: releasing messages not started');
     expect(instance.output()).not.toContain('consumer shutdown timed out');
-    // Encerrou pelo hook de shutdown: o NestJS fecha o app e reemite o SIGTERM (código 143).
+    // Shutdown gracioso: app.close() rodou os hooks (consumidor drenou) e o processo saiu com 0.
     expect(instance.output()).toContain('consumer stopped');
-    expect(instance.process.signalCode).toBe('SIGTERM');
-    expect(exitCode).toBe(143);
+    expect(instance.output()).toContain('shutdown complete');
+    expect(exitCode).toBe(0);
     expect(await debits(w.id)).toBe(1); // só a que estava em andamento
 
-    // As 2 não iniciadas estão visíveis de novo bem antes dos 30s de visibility timeout.
-    const { Messages = [] } = await q.sqs.send(
-      new ReceiveMessageCommand({ QueueUrl: q.urls.wagerTransactions, MaxNumberOfMessages: 10, WaitTimeSeconds: 2, VisibilityTimeout: 0 }),
-    );
-    expect(Messages).toHaveLength(2);
+    // As 2 restantes ficam VISÍVEIS bem antes dos 30s de visibility timeout: ou vieram no 1º lote e foram
+    // devolvidas no shutdown, ou nem chegaram a ser recebidas (o broker pode entregar um lote menor). A
+    // devolução em si é provada de forma determinística em test/integration/sqs-consumer.test.ts.
+    await waitFor(async () => (await visibleMessages()) === 2, 5_000, '2 messages visible again');
 
     const consumer = t.app.get(WagerTransactionConsumer);
     await waitFor(async () => {

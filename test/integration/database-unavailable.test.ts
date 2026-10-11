@@ -72,6 +72,11 @@ describe('PostgreSQL indisponível', () => {
       const read = await fetch(`${t.baseUrl}/wallets/${w.id}`);
       expect(read.status).toBe(503);
       expect(((await read.json()) as { code: string }).code).toBe('SERVICE_UNAVAILABLE');
+
+      const ready = await fetch(`${t.baseUrl}/health/ready`);
+      expect(ready.status).toBe(503);
+      expect(await ready.json()).toEqual({ status: 'error', checks: { postgres: 'down', sqs: 'up' } });
+      expect((await fetch(`${t.baseUrl}/health/live`)).status).toBe(200);
     } finally {
       proxy.resume();
     }

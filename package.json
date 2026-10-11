@@ -11,7 +11,8 @@
     "migration:up": "bun --bun mikro-orm migration:up",
     "migration:down": "bun --bun mikro-orm migration:down",
     "migration:list": "bun --bun mikro-orm migration:list",
-    "sqs:create-queues": "bun run scripts/create-queues.ts"
+    "sqs:create-queues": "bun run scripts/create-queues.ts",
+    "test:load": "bun run scripts/load-test.ts"
   },
   "mikro-orm": {
     "configPaths": [

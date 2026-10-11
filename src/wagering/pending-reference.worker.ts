@@ -1,7 +1,6 @@
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../config';
-import { Metrics } from '../metrics/metrics';
 import { ProcessWagerTransaction, type PendingReferenceOutcome } from './process-wager-transaction';
 
 const BATCH_SIZE = 50;
@@ -27,7 +26,6 @@ export class PendingReferenceWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly orm: MikroORM,
     private readonly processWagerTransaction: ProcessWagerTransaction,
-    private readonly metrics: Metrics,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -58,7 +56,6 @@ export class PendingReferenceWorker implements OnModuleInit, OnModuleDestroy {
       if (this.stopped) break;
       outcomes.push(await this.processWagerTransaction.retryPendingReference(row.id, row.wallet_id));
     }
-    await this.updatePendingGauge();
     return outcomes;
   }
 
@@ -79,12 +76,5 @@ export class PendingReferenceWorker implements OnModuleInit, OnModuleDestroy {
         reason: error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error',
       });
     }
-  }
-
-  private async updatePendingGauge(): Promise<void> {
-    const [row] = await this.orm.em
-      .getConnection()
-      .execute<{ count: number }[]>(`select count(*)::int as count from wager_transactions where status = 'PENDING_REFERENCE'`);
-    this.metrics.pendingReferences.set(row?.count ?? 0);
   }
 }

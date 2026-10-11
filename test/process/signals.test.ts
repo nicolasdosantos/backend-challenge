@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 /**
  * Valida que um processo filho criado com Bun.spawn recebe SIGTERM, termina o trabalho em
- * andamento e sai com código 0. Base para os testes de shutdown gracioso e crash (Fase 6).
+ * andamento e sai com código 0. Base para os testes de shutdown gracioso e crash.
  * No Windows não há entrega de SIGTERM (o kill é forçado), por isso o teste roda em Linux:
  * `docker compose run --rm tests`.
  */
