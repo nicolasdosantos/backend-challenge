@@ -1,3 +1,5 @@
+// Endpoints HTTP de wallets: criação, consulta, ledger paginado e reconciliação.
+
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { InvalidRequestError } from '../application-errors';
 import { ProviderAuthGuard } from '../auth/provider-auth.guard';
@@ -12,6 +14,7 @@ interface CreateWalletBody {
   initialBalance: MoneyProps;
 }
 
+/** Validação de forma do corpo; valor e moeda são validados depois pelo Money. */
 function parseCreateWalletBody(body: unknown): CreateWalletBody {
   const b = body as Partial<Record<keyof CreateWalletBody, unknown>> | null;
   const balance = b?.initialBalance as Partial<Record<keyof MoneyProps, unknown>> | undefined;
@@ -57,6 +60,7 @@ export class WalletsController {
   }
 
   @Post(':walletId/reconciliation')
+  // POST que não cria recurso: 200 em vez do 201 padrão do NestJS.
   @HttpCode(200)
   async reconcile(@Param('walletId') walletId: string): Promise<ReconciliationReport> {
     return this.reconciliation.reconcile(walletId);

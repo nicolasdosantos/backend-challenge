@@ -1,3 +1,5 @@
+// Consultas de wallet e do ledger paginado por cursor.
+
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Injectable } from '@nestjs/common';
 import { InvalidRequestError, WalletNotFoundError } from '../application-errors';
@@ -117,6 +119,7 @@ export class WalletQueries {
         where wallet_id = ? and seq > ?
         order by seq
         limit ?`,
+      // limit + 1: a linha a mais só serve para saber se existe uma próxima página.
       [walletId, cursor?.seq ?? '0', limit + 1],
     );
 

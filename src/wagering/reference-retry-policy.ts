@@ -1,3 +1,5 @@
+// Política de reprocessamento de PENDING_REFERENCE: funções puras, sem banco, fáceis de testar.
+
 /** Backoff exponencial do reprocessamento de PENDING_REFERENCE. */
 export interface ReferenceRetryPolicy {
   baseDelayMs: number;

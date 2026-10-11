@@ -1,3 +1,5 @@
+// Endpoints HTTP de transações: submissão (POST /wagering/transactions) e consultas por id interno ou do provedor.
+
 import { Body, Controller, Get, Headers, Param, Post, Res, UseGuards } from '@nestjs/common';
 import { InvalidRequestError } from '../application-errors';
 import { ProviderAuthGuard } from '../auth/provider-auth.guard';
@@ -21,10 +23,12 @@ export function parseSubmitRequest(
   if (!idempotencyKey) {
     throw new InvalidRequestError('Idempotency-Key header is required');
   }
+  // O corpo pode repetir a chave, mas se repetir tem que ser igual à do header.
   const bodyKey = (body as { idempotencyKey?: unknown } | null)?.idempotencyKey;
   if (bodyKey !== undefined && bodyKey !== idempotencyKey) {
     throw new InvalidRequestError('Body idempotencyKey differs from the Idempotency-Key header');
   }
+  // Sem X-Correlation-ID, um id novo é gerado para rastrear a requisição nos logs e nos eventos.
   return { ...parseWagerPayload(body), idempotencyKey, correlationId: correlationId ?? newId() };
 }
 

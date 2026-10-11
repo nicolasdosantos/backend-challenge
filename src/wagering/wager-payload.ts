@@ -1,3 +1,5 @@
+// Validação de forma (tipos) do payload de uma transação. As regras de negócio ficam no domínio.
+
 import { InvalidRequestError } from '../application-errors';
 import type { WagerPayload } from './payload-hash';
 
@@ -21,6 +23,7 @@ export function parseWagerPayload(value: unknown): WagerPayload {
   if (typeof money?.amount !== 'string' || typeof money.currency !== 'string') {
     throw new InvalidRequestError('money must be { amount: string, currency: string }');
   }
+  // null não conta como ausente: o campo opcional deve ser omitido ou ser uma string.
   if (b.referenceExternalTransactionId !== undefined && typeof b.referenceExternalTransactionId !== 'string') {
     throw new InvalidRequestError('referenceExternalTransactionId must be a string');
   }

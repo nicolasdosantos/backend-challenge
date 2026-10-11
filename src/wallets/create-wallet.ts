@@ -1,3 +1,5 @@
+// Caso de uso de abertura de wallet (POST /wallets).
+
 import { UniqueConstraintViolationException } from '@mikro-orm/core';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Injectable, Logger } from '@nestjs/common';
@@ -36,6 +38,7 @@ export class CreateWallet {
 
     try {
       await this.orm.em.fork().transactional(async (em) => {
+        // flush em etapas: os INSERTs saem na ordem das FKs (wallet → transação OPENING → lançamento).
         em.persist(walletToRecord(wallet));
         await em.flush();
 
