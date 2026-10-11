@@ -1,3 +1,6 @@
+// Autenticação dos provedores (ponto de extensão). Já está ligado por @UseGuards aos controllers de
+// wallets e de transações; health e métricas ficam de fora.
+
 import { Injectable, type CanActivate } from '@nestjs/common';
 
 /**

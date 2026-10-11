@@ -1,3 +1,5 @@
+// Endpoint GET /metrics no formato Prometheus. Fica sem autenticação, como os health checks.
+
 import { GetQueueAttributesCommand, GetQueueUrlCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Controller, Get, Header, Inject } from '@nestjs/common';

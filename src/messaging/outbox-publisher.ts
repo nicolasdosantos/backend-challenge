@@ -1,3 +1,5 @@
+// Publicador da outbox: loop em segundo plano que envia os eventos já commitados para a fila de eventos.
+
 import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
@@ -62,6 +64,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   async publishOnce(now = new Date()): Promise<PublishResult> {
     const queues = await this.queueUrls();
     const result = await this.orm.em.fork().transactional(async (em) => {
+      // SKIP LOCKED: linhas que outro publicador já pegou são puladas, sem esperar por elas.
       const rows = await em.getConnection().execute<OutboxRow[]>(
         `select id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at
            from outbox_messages
@@ -111,6 +114,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
           });
         }
         await this.afterSend(message.id);
+        // published_at (ou o novo agendamento) só vale no commit deste ciclo; se o processo morrer antes, nada fica marcado.
         await this.saveState(em, message);
       }
       return counts;
@@ -143,6 +147,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     }, delayMs);
   }
 
+  /** Um ciclo do loop. Devolve true quando o lote veio cheio, sinal de que ainda há pendentes. */
   private async runOnce(): Promise<boolean> {
     try {
       const { published, failed } = await this.publishOnce();

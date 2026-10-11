@@ -1,3 +1,6 @@
+// Módulo raiz. Recebe a configuração já carregada (forRoot) em vez de ler process.env aqui: assim os
+// testes sobem mais de uma instância da app no mesmo processo, cada uma com a sua configuração.
+
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
@@ -34,9 +37,11 @@ export class AppModule {
       providers: [
         { provide: APP_CONFIG, useValue: config },
         { provide: SQS_CLIENT, useFactory: () => createSqsClient(config.sqs) },
+        // Filtro global: qualquer erro de qualquer controller sai no mesmo formato.
         { provide: APP_FILTER, useClass: HttpExceptionFilter },
         Metrics,
         ProcessWagerTransaction,
+        // Worker, consumidor e publicador são loops em segundo plano; cada um pode ser desligado por variável de ambiente.
         PendingReferenceWorker,
         WagerTransactionConsumer,
         OutboxPublisher,

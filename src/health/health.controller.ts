@@ -1,3 +1,5 @@
+// Health checks: /health/live (o processo está de pé) e /health/ready (PostgreSQL e SQS respondendo).
+
 import { GetQueueUrlCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Controller, Get, Inject, Logger, Res } from '@nestjs/common';
@@ -6,6 +8,7 @@ import { QUEUE_NAMES, SQS_CLIENT } from '../sqs/sqs';
 
 type CheckStatus = 'up' | 'down';
 
+// Prazo de cada verificação: um banco ou SQS travado vira "down" em vez de deixar o readiness pendurado.
 const CHECK_TIMEOUT_MS = 2000;
 
 /** Health checks ficam fora de qualquer autenticação (enunciado §2 e §9). */
