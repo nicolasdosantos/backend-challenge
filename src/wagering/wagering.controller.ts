@@ -28,7 +28,7 @@ export function parseSubmitRequest(
   if (bodyKey !== undefined && bodyKey !== idempotencyKey) {
     throw new InvalidRequestError('Body idempotencyKey differs from the Idempotency-Key header');
   }
-  // Sem X-Correlation-ID, um id novo é gerado para rastrear a requisição nos logs e nos eventos.
+  // Sem X-Correlation-ID, um id novo é criado para rastrear a requisição nos logs e nos eventos.
   return { ...parseWagerPayload(body), idempotencyKey, correlationId: correlationId ?? newId() };
 }
 
