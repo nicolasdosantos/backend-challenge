@@ -120,10 +120,10 @@ describe('SIGTERM com mensagem em andamento', () => {
 
     expect(instance.output()).toContain('shutting down: releasing messages not started');
     expect(instance.output()).not.toContain('consumer shutdown timed out');
-    // Encerrou pelo hook de shutdown: o NestJS fecha o app e reemite o SIGTERM (código 143).
+    // Shutdown gracioso: app.close() rodou os hooks (consumidor drenou) e o processo saiu com 0.
     expect(instance.output()).toContain('consumer stopped');
-    expect(instance.process.signalCode).toBe('SIGTERM');
-    expect(exitCode).toBe(143);
+    expect(instance.output()).toContain('shutdown complete');
+    expect(exitCode).toBe(0);
     expect(await debits(w.id)).toBe(1); // só a que estava em andamento
 
     // As 2 não iniciadas estão visíveis de novo bem antes dos 30s de visibility timeout.
