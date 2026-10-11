@@ -1,3 +1,5 @@
+// Migration no banco de teste real: up cria tudo, down remove tudo e up recria (migration reversível).
+
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createTestOrm } from '../support/database';

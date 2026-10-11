@@ -1,3 +1,6 @@
+// A mesma aposta (mesma Idempotency-Key, mesmo corpo) enviada 50 vezes em paralelo pela API real:
+// um único débito; as outras 49 respostas são replay com o mesmo resultado.
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createTestApp, type TestApp } from '../support/app';
 import { submitTransaction } from '../support/http';

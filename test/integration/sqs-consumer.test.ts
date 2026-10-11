@@ -1,3 +1,6 @@
+// Consumidor SQS com filas reais: caminho feliz, redelivery da mesma mensagem, replay pela chave, rejeição
+// e pendência via fila, mensagens inválidas indo à DLQ e devolução das mensagens no shutdown.
+
 import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

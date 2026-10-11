@@ -1,3 +1,6 @@
+// POST /wallets: abertura com OPENING, lançamento e eventos na mesma transação; saldo zero; wallet
+// duplicada; entradas inválidas.
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { newId } from '../../src/domain/id';
 import { createTestApp, type TestApp } from '../support/app';

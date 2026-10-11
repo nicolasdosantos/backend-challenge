@@ -1,3 +1,5 @@
+// Health checks e /metrics com a app NestJS real, PostgreSQL e filas reais.
+
 import { DeleteQueueCommand } from '@aws-sdk/client-sqs';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createSqsClient, ensureQueues, type QueueUrls } from '../../src/sqs/sqs';

@@ -1,3 +1,6 @@
+// Paginação do ledger por cursor (keyset em seq): percorre tudo sem repetir nem pular, inclusive com
+// lançamentos novos entrando entre uma página e outra.
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import type { LedgerPage } from '../../src/wallets/wallet-queries';

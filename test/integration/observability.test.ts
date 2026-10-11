@@ -1,3 +1,6 @@
+// Observabilidade: métricas presentes no /metrics, gauges lidos no momento do scrape, logs com ids de
+// rastreio e sem valores financeiros, readiness com o SQS fora.
+
 import { SendMessageCommand } from '@aws-sdk/client-sqs';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { newId } from '../../src/domain/id';

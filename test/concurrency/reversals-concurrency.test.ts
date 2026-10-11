@@ -1,3 +1,6 @@
+// Concorrência nas reversões: duas reversões da mesma BET disparadas juntas e dois workers resolvendo
+// as mesmas pendências ao mesmo tempo. Em todos os casos cada crédito é aplicado uma única vez.
+
 import { MikroORM } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { APP_CONFIG, type AppConfig } from '../../src/config';

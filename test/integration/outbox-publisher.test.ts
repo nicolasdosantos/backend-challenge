@@ -1,3 +1,6 @@
+// Publicador da outbox com PostgreSQL e SQS reais: nada sai antes do commit, os 4 tipos de evento, crash
+// entre o envio e a marcação, falha de envio com backoff e a vazão do loop.
+
 import { CreateQueueCommand, DeleteQueueCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

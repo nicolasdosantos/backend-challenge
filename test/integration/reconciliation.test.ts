@@ -1,3 +1,6 @@
+// Reconciliação: wallet saudável dá consistent true; um saldo corrompido direto no banco de teste é
+// sinalizado na resposta, logado e contado em métrica, mas não é corrigido.
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import { ReconciliationService } from '../../src/wallets/reconciliation';

@@ -1,3 +1,6 @@
+// Contrato HTTP de POST /wagering/transactions e das consultas: status por resultado (200, 202, 422),
+// replays e o corpo de erro único.
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { newId } from '../../src/domain/id';
 import { computePayloadHash } from '../../src/wagering/payload-hash';
