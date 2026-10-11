@@ -188,3 +188,26 @@ describe('publicação da outbox', () => {
     expect(delivered.filter((id: string) => id === pendingBefore.id)).toHaveLength(2);
   });
 });
+
+describe('loop do publicador', () => {
+  test('com lote cheio o próximo ciclo começa na hora: 12 eventos com lote 4 e intervalo de 1s saem em bem menos de 3s', async () => {
+    const loop = await createTestApp({ queuePrefix: q.prefix, outbox: { publisherEnabled: true, batchSize: 4, pollIntervalMs: 1000 } });
+    try {
+      await discardForeignOutboxBacklog(loop.orm);
+      const wallets = await Promise.all(Array.from({ length: 6 }, () => openWallet(loop, '10.00'))); // 12 eventos
+      const walletIds = wallets.map((w) => w.id);
+      touched.push(...walletIds);
+
+      const started = Date.now();
+      while ((await unpublishedFor(loop.orm, walletIds)) > 0 && Date.now() - started < 10_000) {
+        await Bun.sleep(50);
+      }
+      // Sem a continuação imediata seriam 3 ciclos × 1s de intervalo (≥ 3s).
+      expect(await unpublishedFor(loop.orm, walletIds)).toBe(0);
+      expect(Date.now() - started).toBeLessThan(2500);
+    } finally {
+      await loop.close();
+    }
+    await drain(q, q.urls.walletEvents, 0);
+  }, 20_000);
+});
