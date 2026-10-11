@@ -1,3 +1,5 @@
+import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
+import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { APP_CONFIG, type AppConfig } from '../../src/config';
 import { newId } from '../../src/domain/id';
@@ -6,7 +8,7 @@ import { PendingReferenceWorker } from '../../src/wagering/pending-reference.wor
 import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import { createTestApp, type TestApp } from '../support/app';
 import { countRows, expectLedgerConsistent } from '../support/invariants';
-import { createTestQueues, drain, queueDepth, sendRaw, sendWagerMessage, wagerMessageBody, type TestQueues } from '../support/sqs';
+import { createTestQueues, drain, queueDepth, sendRaw, sendWagerMessage, wagerMessageBody, waitFor, type TestQueues } from '../support/sqs';
 import { openWallet, referencing, wagerCommand } from '../support/wagering';
 import { runWorkerUntilSettled } from '../support/worker';
 
@@ -172,5 +174,56 @@ describe('mensagens permanentemente inválidas vão direto à DLQ, com motivo (#
     expect((await t.metrics.deadLettered.get()).values.reduce((s, v) => s + v.value, 0)).toBe(deadBefore + 3);
     expect(await balance(w.id)).toBe('90.00'); // só a mensagem válida teve efeito
     expect(await inboxRows(messageId)).toBe(1);
+  });
+});
+
+/** Para a 1ª mensagem antes do commit até o teste liberar (simula uma mensagem "em andamento"). */
+class PausingBeforeCommit extends ProcessWagerTransaction {
+  private release!: () => void;
+  private readonly gate = new Promise<void>((resolve) => (this.release = resolve));
+  private reached!: () => void;
+  readonly reachedCommit = new Promise<void>((resolve) => (this.reached = resolve));
+
+  letCommit() {
+    this.release();
+  }
+
+  protected override async beforeCommit(_em: EntityManager): Promise<void> {
+    this.reached();
+    await this.gate;
+  }
+}
+
+describe('shutdown do consumidor', () => {
+  test('mensagens recebidas e não iniciadas voltam a ficar visíveis na hora; a em andamento termina e é confirmada', async () => {
+    const w = await wallet('100.00');
+    const commands = [1, 2, 3].map(() => wagerCommand(w, { money: brl('10.00') }));
+    for (const command of commands) await sendWagerMessage(q, command); // mesmo grupo (walletId): mesmo lote
+
+    const config = t.app.get<AppConfig>(APP_CONFIG);
+    // Visibility de 30s: sem a devolução, as não iniciadas ficariam invisíveis por 30s.
+    const slowConfig: AppConfig = { ...config, consumer: { ...config.consumer, visibilityTimeoutSeconds: 30 } };
+    const pausing = new PausingBeforeCommit(t.orm, t.metrics, config);
+    const stopping = new WagerTransactionConsumer(pausing, t.metrics, q.sqs, slowConfig);
+
+    const polling = stopping.pollOnce();
+    await pausing.reachedCommit; // 1ª mensagem em andamento, lote de 3 já recebido
+    await stopping.onModuleDestroy(); // shutdown: para de buscar
+    pausing.letCommit();
+    expect(await polling).toEqual(['processed', 'released', 'released']);
+
+    const { Attributes } = await q.sqs.send(
+      new GetQueueAttributesCommand({ QueueUrl: q.urls.wagerTransactions, AttributeNames: ['ApproximateNumberOfMessages'] }),
+    );
+    expect(Attributes?.ApproximateNumberOfMessages).toBe('2'); // visíveis na hora, não daqui a 30s
+
+    await waitFor(async () => {
+      await consumer.pollOnce();
+      return (await queueDepth(q, q.urls.wagerTransactions)) === 0;
+    }, 10_000, 'released messages processed');
+    for (const command of commands) {
+      expect(await transactionsFor(command.idempotencyKey)).toBe(1);
+    }
+    expect(await balance(w.id)).toBe('70.00');
   });
 });

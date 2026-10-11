@@ -88,7 +88,7 @@ describe('cenário §13 #5: worker morto depois do commit e antes do ack', () =>
 });
 
 describe('SIGTERM com mensagem em andamento', () => {
-  test('a mensagem em andamento termina e é confirmada; as recebidas e não iniciadas voltam na hora', async () => {
+  test('a mensagem em andamento termina e é confirmada, o processo sai com 0 e as demais ficam visíveis na hora', async () => {
     const w = await openWallet(t, '100.00');
     touched.push(w.id);
     // 3 mensagens em grupos diferentes para chegarem no mesmo lote.
@@ -125,7 +125,6 @@ describe('SIGTERM com mensagem em andamento', () => {
     await holder;
     const exitCode = await instance.process.exited;
 
-    expect(instance.output()).toContain('shutting down: releasing messages not started');
     expect(instance.output()).not.toContain('consumer shutdown timed out');
     // Shutdown gracioso: app.close() rodou os hooks (consumidor drenou) e o processo saiu com 0.
     expect(instance.output()).toContain('consumer stopped');
@@ -133,12 +132,9 @@ describe('SIGTERM com mensagem em andamento', () => {
     expect(exitCode).toBe(0);
     expect(await debits(w.id)).toBe(1); // só a que estava em andamento
 
-    // O processo devolveu as mensagens recebidas e não iniciadas (o 1º lote pode ter trazido 2 ou 3 delas;
-    // a que não veio no lote nunca ficou invisível). Em ambos os casos, as 2 restantes ficam VISÍVEIS bem
-    // antes dos 30s de visibility timeout. Conferido pelo atributo da fila, sem consumir: um ReceiveMessage
-    // com long polling pode devolver só parte das mensagens visíveis.
-    const released = /releasing messages not started","count":(\d+)/.exec(instance.output());
-    expect(Number(released?.[1])).toBeGreaterThanOrEqual(1);
+    // As 2 restantes ficam VISÍVEIS bem antes dos 30s de visibility timeout: ou vieram no 1º lote e foram
+    // devolvidas no shutdown, ou nem chegaram a ser recebidas (o broker pode entregar um lote menor). A
+    // devolução em si é provada de forma determinística em test/integration/sqs-consumer.test.ts.
     await waitFor(async () => (await visibleMessages()) === 2, 5_000, '2 messages visible again');
 
     const consumer = t.app.get(WagerTransactionConsumer);
