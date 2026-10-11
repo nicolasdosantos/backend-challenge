@@ -1,4 +1,4 @@
-import { ReceiveMessageCommand } from '@aws-sdk/client-sqs';
+import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
 import { LockMode } from '@mikro-orm/core';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { WalletRecord } from '../../src/database/records';
@@ -46,6 +46,13 @@ async function balance(walletId: string) {
   const [row] = await t.orm.em.getConnection().execute<{ balance: string }[]>(`select balance::text as balance from wallets where id = ?`, [walletId]);
   return row?.balance;
 }
+async function visibleMessages(): Promise<number> {
+  const { Attributes } = await q.sqs.send(
+    new GetQueueAttributesCommand({ QueueUrl: q.urls.wagerTransactions, AttributeNames: ['ApproximateNumberOfMessages'] }),
+  );
+  return Number(Attributes?.ApproximateNumberOfMessages ?? 0);
+}
+
 const debits = (walletId: string) =>
   countRows(t.orm, `select 1 from wallet_ledger_entries where wallet_id = ? and direction = 'DEBIT'`, [walletId]);
 
@@ -126,11 +133,13 @@ describe('SIGTERM com mensagem em andamento', () => {
     expect(exitCode).toBe(0);
     expect(await debits(w.id)).toBe(1); // só a que estava em andamento
 
-    // As 2 não iniciadas estão visíveis de novo bem antes dos 30s de visibility timeout.
-    const { Messages = [] } = await q.sqs.send(
-      new ReceiveMessageCommand({ QueueUrl: q.urls.wagerTransactions, MaxNumberOfMessages: 10, WaitTimeSeconds: 2, VisibilityTimeout: 0 }),
-    );
-    expect(Messages).toHaveLength(2);
+    // O processo devolveu as mensagens recebidas e não iniciadas (o 1º lote pode ter trazido 2 ou 3 delas;
+    // a que não veio no lote nunca ficou invisível). Em ambos os casos, as 2 restantes ficam VISÍVEIS bem
+    // antes dos 30s de visibility timeout. Conferido pelo atributo da fila, sem consumir: um ReceiveMessage
+    // com long polling pode devolver só parte das mensagens visíveis.
+    const released = /releasing messages not started","count":(\d+)/.exec(instance.output());
+    expect(Number(released?.[1])).toBeGreaterThanOrEqual(1);
+    await waitFor(async () => (await visibleMessages()) === 2, 5_000, '2 messages visible again');
 
     const consumer = t.app.get(WagerTransactionConsumer);
     await waitFor(async () => {
