@@ -46,7 +46,7 @@ export class Metrics {
 
   readonly pendingReferences = new Gauge({
     name: 'wager_transactions_pending_reference',
-    help: 'Transações aguardando referência (atualizado a cada ciclo do worker)',
+    help: 'Transações aguardando referência (lido do banco no scrape; -1 se indisponível)',
     registers: [this.registry],
   });
 
@@ -91,7 +91,7 @@ export class Metrics {
 
   readonly outboxLagSeconds = new Gauge({
     name: 'outbox_lag_seconds',
-    help: 'Idade do evento não publicado mais antigo (0 se não há pendentes)',
+    help: 'Idade em segundos do evento não publicado mais antigo (lido do banco no scrape; 0 se não há pendentes, -1 se indisponível)',
     registers: [this.registry],
   });
 

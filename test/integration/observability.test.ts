@@ -2,12 +2,13 @@ import { SendMessageCommand } from '@aws-sdk/client-sqs';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { newId } from '../../src/domain/id';
 import { WagerTransactionConsumer } from '../../src/messaging/wager-transaction.consumer';
+import { ProcessWagerTransaction } from '../../src/wagering/process-wager-transaction';
 import { createTestApp, type TestApp } from '../support/app';
 import { submitTransaction } from '../support/http';
 import { expectLedgerConsistent } from '../support/invariants';
 import { createTestQueues, drain, sendWagerMessage, type TestQueues } from '../support/sqs';
 import { testDatabaseUrl } from '../support/test-env';
-import { openWallet, wagerCommand } from '../support/wagering';
+import { openWallet, referencing, wagerCommand } from '../support/wagering';
 
 let q: TestQueues;
 let t: TestApp;
@@ -43,6 +44,18 @@ describe('métricas', () => {
     for (const [meaning, name] of Object.entries(REQUIRED_METRICS)) {
       expect({ meaning, present: body.includes(`# TYPE ${name} `) }).toEqual({ meaning, present: true });
     }
+  });
+
+  test('outbox lag e pendências refletem o banco no momento do scrape (publicador e worker desligados aqui)', async () => {
+    const w = await openWallet(t, '100.00'); // 2 eventos não publicados
+    touched.push(w.id);
+    await t.app.get(ProcessWagerTransaction).execute(referencing(wagerCommand(w, { money: { amount: '5.00', currency: 'BRL' } }), 'REFUND'));
+    await Bun.sleep(1100);
+
+    const body = await (await fetch(`${t.baseUrl}/metrics`)).text();
+    const gauge = (name: string) => Number(body.split('\n').find((l) => l.startsWith(`${name} `))?.split(' ')[1]);
+    expect(gauge('outbox_lag_seconds')).toBeGreaterThanOrEqual(1);
+    expect(gauge('wager_transactions_pending_reference')).toBeGreaterThanOrEqual(1);
   });
 
   test('o gauge da DLQ lê a fila real (inclui mensagens que não passaram pelo consumidor)', async () => {

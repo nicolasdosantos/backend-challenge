@@ -1,7 +1,6 @@
 import { MikroORM } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { APP_CONFIG, type AppConfig } from '../../src/config';
-import { Metrics } from '../../src/metrics/metrics';
 import { PendingReferenceWorker } from '../../src/wagering/pending-reference.worker';
 import { ProcessWagerTransaction, type ProcessWagerTransactionCommand } from '../../src/wagering/process-wager-transaction';
 import { createTestApp, type TestApp } from '../support/app';
@@ -54,7 +53,7 @@ describe('dois workers sobre as mesmas pendências (#9)', () => {
   test('20 REFUNDs pendentes resolvidos por 2 workers ao mesmo tempo: cada crédito aplicado uma única vez', async () => {
     const config = t.app.get<AppConfig>(APP_CONFIG);
     const newWorker = () =>
-      new PendingReferenceWorker(t.app.get(MikroORM) as MikroORM, useCase, t.app.get(Metrics), config);
+      new PendingReferenceWorker(t.app.get(MikroORM) as MikroORM, useCase, config);
     const workerA = newWorker();
     const workerB = newWorker();
 
