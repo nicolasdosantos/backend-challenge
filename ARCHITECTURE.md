@@ -256,6 +256,7 @@ commit;
 - **Vários publicadores:** `SKIP LOCKED` faz cada um pegar um lote diferente (testado: 2 publicadores, 60 eventos, cada um enviado exatamente uma vez).
 - **Crash:** se o processo morre depois do envio e antes do commit, a transação é desfeita e outro publicador reenvia. Entrega **at-least-once**: o `MessageDeduplicationId = eventId` costuma absorver o reenvio no broker (janela de 5 min do FIFO), mas o consumidor de eventos deve deduplicar pelo `eventId` (testado com duplicata forçada e um consumidor que deduplica pela inbox).
 - **Falha de envio:** o evento é reagendado e **nunca** marcado como publicado sem ter sido enviado.
+- **Vazão:** quando um ciclo publica um lote cheio, o próximo começa na hora (sem esperar `OUTBOX_POLL_INTERVAL_MS`); o intervalo só vale quando a outbox está em dia. Sem isso o publicador ficava limitado a `lote ÷ intervalo` (40 eventos/s com os padrões) e a outbox crescia sob carga (§16).
 - **Trade-off — transação aberta durante o envio:** segura o lock do lote enquanto chama o SQS. Vantagem: simples e seguro (não há estado "reservado" para recuperar; morreu, desfez). Custo: conexões e locks presos durante chamadas de rede; mitigado por lotes pequenos e timeouts. Alternativa não adotada: reservar o lote com prazo, publicar fora da transação e confirmar depois.
 - **Ordem dos eventos é best-effort:** com dois publicadores ou um evento em retry, eventos da mesma wallet podem sair fora de ordem. O consumidor deduplica pelo `eventId` e ordena pelo `walletVersion` quando precisar.
 
@@ -275,6 +276,8 @@ commit;
 | Outbox lag | `outbox_lag_seconds` (idade do evento não publicado mais antigo) |
 | Latência de processamento | `wager_transaction_processing_seconds{kind}` (histograma; inclui a espera pelo lock) |
 | Outras | `sqs_messages_consumed_total{outcome}`, `outbox_events_published_total{eventType}`, `reconciliation_mismatches_total` |
+
+Os gauges de estado (`outbox_lag_seconds`, `wager_transactions_pending_reference`, `sqs_dead_letter_queue_messages`) são lidos da fonte da verdade (PostgreSQL ou SQS) no momento do scrape: o valor é atual e não depende de a instância rodar o publicador ou o worker; se a fonte estiver fora, o valor é `-1` e o scrape não falha.
 
 **Health:** `/health/live` (processo vivo) e `/health/ready` (`select 1` no PostgreSQL + `GetQueueUrl` no SQS, timeout de 2 s cada; **503** se algum falhar, com log `warn` do motivo). O readiness usa `select 1` porque o `checkConnection()` do MikroORM 7 não vai ao banco enquanto o pool não abriu conexão.
 
@@ -299,7 +302,7 @@ commit;
 - **`numeric(20,2)` arredonda** valores com mais de 2 casas em vez de recusá-los; o `Money` é o único caminho de escrita e rejeita esses valores antes.
 - **"Toda alteração de saldo tem lançamento"** é garantido pelo agregado e verificado pela reconciliação, não por constraint.
 - **Testado com o MiniStack**, não contra AWS SQS real.
-- **Não testado:** volume alto (não há teste de carga), SIGTERM com mensagem que ultrapassa o `SQS_CONSUMER_SHUTDOWN_TIMEOUT_MS` (o caminho existe e loga `warn`).
+- **Não testado:** SIGTERM com mensagem que ultrapassa o `SQS_CONSUMER_SHUTDOWN_TIMEOUT_MS` (o caminho existe e loga `warn`); carga com várias instâncias e contra AWS real (§16).
 
 ## 13. Autenticação
 
@@ -333,3 +336,20 @@ Não implementada: não pontua no enunciado e competiria com correção financei
 | Publicação de evento antes do commit | eventos só na outbox, na transação de negócio; publicador lê só o commitado | `test/integration/outbox-publisher.test.ts` › "com a transação de negócio parada antes do commit, o publisher não publica nada dela…"; `test/integration/process-wager-transaction.test.ts` › "falha após atualizar o saldo e antes do commit: rollback total…" |
 | Ausência de ledger auditável | lançamento por movimentação, append-only por trigger, aritmética por `CHECK`, consulta paginada, reconciliação | `test/integration/schema-constraints.test.ts` › "UPDATE é recusado pelo trigger", "DELETE…", "TRUNCATE…"; `test/integration/ledger-pagination.test.ts`; `test/integration/reconciliation.test.ts` › "saldo corrompido…: divergência sinalizada, logada, contada e NÃO corrigida"; invariante saldo = ledger no fim de todos os arquivos |
 | Testes que substituem PostgreSQL e SQS por mocks | nenhum mock: `test/support/app.ts` sobe a app real no PostgreSQL real; `test/support/sqs.ts` cria filas reais no emulador | todos os arquivos de `test/integration` e `test/concurrency` (ex.: `test/integration/migrations.test.ts`, `test/integration/sqs-consumer.test.ts`); nenhum uso de mock/spy no diretório `test/` |
+
+## 16. Teste de carga (`bun run test:load`)
+
+Opcional no enunciado. `scripts/load-test.ts` dispara `POST /wagering/transactions` contra uma app já rodando, com concorrência controlada, e coleta latência, status HTTP, conflitos de lock (`/metrics`), outbox lag (amostrado a cada 500 ms e até a outbox esvaziar) e a reconciliação da wallet mais disputada. Parâmetros por variável de ambiente (`LOAD_*`).
+
+**Ambiente:** Windows 10, 12 CPUs; app no host (Bun 1.4.3, **uma** instância, `DB_POOL_MAX=10`, consumidor, publicador e worker ligados); PostgreSQL e MiniStack no Docker Desktop (WSL 2). **Metodologia:** 2.000 requisições `BET` de 1.00, concorrência 50, 20 wallets, 50% das apostas numa única wallet "quente", 10% de reenvios com a mesma `Idempotency-Key`. Uma execução de cada (números variam entre execuções).
+
+| Execução | Throughput | p50 | p95 | p99 | Erros | Conflitos de lock | Outbox lag máx. / ao final | Wallet quente |
+|---|---|---|---|---|---|---|---|---|
+| 1ª (publicador esperava o intervalo entre lotes) | 135,8 req/s | 336 ms | 634 ms | 827 ms | 0% (2.000 × 200) | 1.014 | 38,8 s / **38,8 s (não esvaziou em 30 s)** | consistente |
+| 2ª (lote cheio → próximo ciclo na hora) | 172,9 req/s | 281 ms | 409 ms | 457 ms | 0% (2.000 × 200) | 1.019 | 14,0 s / 0 s | consistente |
+
+**Análise:**
+- **Correção sob carga:** nenhuma resposta de erro, reenvios devolvidos como replay, wallet quente consistente com o ledger.
+- **Conflitos de lock ≈ metade das requisições:** é o esperado com 50% da carga numa wallet só — as operações dela fazem fila no `FOR UPDATE`. É também o principal motivo da latência: a wallet quente processa uma transação por vez, e 50 requisições simultâneas disputam um pool de 10 conexões. Mais vazão para uma wallet quente exigiria transações mais curtas, não mais instâncias.
+- **Outbox:** a 1ª execução expôs um gargalo real — o publicador estava limitado a `lote ÷ intervalo` (40 eventos/s) enquanto a carga gerava ~270 eventos/s; a outbox não esvaziava. A correção (continuar imediatamente quando o lote vem cheio) reduziu o lag máximo para 14 s e a outbox esvaziou. O envio ainda é sequencial por evento dentro do ciclo; envio em lote (`SendMessageBatch`) ou vários publicadores aumentariam a vazão.
+- **Não medido:** várias instâncias, carga via SQS, AWS real e máquina dedicada (aqui, cliente, app e Docker dividem a mesma máquina, o que pesa nas latências).

@@ -30,12 +30,13 @@ git clone https://github.com/nicolasdosantos/backend-challenge.git
 cd backend-challenge
 cp .env.example .env                           # valores de desenvolvimento local, sem segredos
 bun install                                    # aplica também o patch em patches/ (ver ARCHITECTURE.md §11)
-docker compose up -d postgres sqs sqs-init     # PostgreSQL, emulador SQS e criação das filas
+docker compose up -d --wait postgres sqs       # sobe PostgreSQL e emulador SQS e espera ficarem saudáveis
+docker compose run --rm sqs-init               # cria as filas (idempotente)
 bun run migration:up                           # cria o schema
 bun run start                                  # API em http://localhost:3000
 ```
 
-O `sqs-init` cria as filas `wager-transactions.fifo`, `wager-transactions-dlq.fifo` (com redrive policy) e `wallet-events.fifo` e termina. O PostgreSQL também cria o banco `wagering_test`, usado pelos testes.
+O `sqs-init` cria as filas `wager-transactions.fifo`, `wager-transactions-dlq.fifo` (com redrive policy) e `wallet-events.fifo` e termina (por isso fica fora do `--wait`, que trataria a saída dele como falha). O PostgreSQL também cria o banco `wagering_test`, usado pelos testes.
 
 Com `bun run start` sobem juntos: a API, o consumidor da fila `wager-transactions.fifo`, o publicador da outbox e o worker de `PENDING_REFERENCE`. Cada um pode ser desligado por variável de ambiente (tabela abaixo), por exemplo para rodar uma instância só de API.
 
@@ -50,6 +51,7 @@ Para parar: `Ctrl+C` na app (encerramento gracioso) e `docker compose down` (man
 | Suíte completa (unitários, integração, concorrência, processos) | `docker compose build tests && docker compose run --rm tests` | container Linux, com PostgreSQL e SQS reais |
 | Só concorrência e processos | `docker compose run --rm tests bun test test/concurrency` | container Linux |
 | Capacidades do emulador SQS | `bun run scripts/check-sqs-emulator.ts` | local, com o compose no ar |
+| Teste de carga (opcional) | `bun run test:load` (com a app rodando) | local; resultados e análise em [ARCHITECTURE.md §16](ARCHITECTURE.md#16-teste-de-carga-bun-run-testload) |
 
 - Os testes de integração e concorrência usam PostgreSQL e SQS **reais** (containers do compose); nada é mockado. Eles usam o banco `wagering_test` (o helper recusa qualquer banco que não termine em `_test`) e filas com prefixo único por execução.
 - Rode a suíte completa **no container**: os testes de processos dependem de sinais POSIX (`SIGTERM`), que o Windows não entrega a processos filhos. No Windows, use localmente só os unitários.
