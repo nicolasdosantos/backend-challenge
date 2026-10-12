@@ -1,3 +1,5 @@
+// Geração e validação de ids (UUID).
+
 /** UUID v7: ordenável pelo tempo de criação, o que ajuda índices e paginação por cursor. */
 export function newId(): string {
   return Bun.randomUUIDv7();

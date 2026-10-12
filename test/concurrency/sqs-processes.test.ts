@@ -1,3 +1,7 @@
+// Cenários com processos reais da aplicação (`bun run src/main.ts`) consumindo filas reais: crash depois
+// do commit e antes do ack, SIGTERM com mensagem em andamento, três consumidores na mesma fila e
+// reinício no meio da carga. Os testes com SIGTERM dependem de sinais POSIX (suíte completa no container Linux).
+
 import { GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
 import { LockMode } from '@mikro-orm/core';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

@@ -1,3 +1,6 @@
+// Agregado Wallet: dono do saldo e da version. O saldo só muda por debit/credit, e os dois devolvem
+// o lançamento do ledger da movimentação; quem chama grava saldo e lançamento na mesma transação SQL.
+
 import { CurrencyMismatchError, DomainError, InsufficientFundsError } from './errors';
 import { newId } from './id';
 import { Money } from './money';
@@ -93,11 +96,16 @@ export class Wallet {
     });
   }
 
+  /** O saldo cobre o valor? Saldo igual ao valor também pode (a wallet fica zerada). */
   canDebit(money: Money): boolean {
     this.assertSameCurrency(money);
     return !this._balance.isLessThan(money);
   }
 
+  /**
+   * Débito. Lança InsufficientFundsError se o saldo não cobre; o caso de uso consulta canDebit antes
+   * para gravar a transação como REJECTED em vez de deixar a exceção subir.
+   */
   debit(money: Money, context: MovementContext): WalletLedgerEntry {
     if (!this.canDebit(money)) {
       throw new InsufficientFundsError(`Balance ${this._balance} is not enough to debit ${money}`);
@@ -105,6 +113,7 @@ export class Wallet {
     return this.apply(LedgerDirection.Debit, money, context);
   }
 
+  /** Crédito. Só exige a mesma moeda da wallet. */
   credit(money: Money, context: MovementContext): WalletLedgerEntry {
     this.assertSameCurrency(money);
     return this.apply(LedgerDirection.Credit, money, context);

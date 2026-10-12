@@ -1,3 +1,5 @@
+// Conversão entre os registros do banco (records.ts) e os objetos de domínio.
+
 import type { FailureCode } from '../domain/failure-code';
 import type { InboxMessage } from '../domain/inbox-message';
 import { Money } from '../domain/money';
@@ -15,6 +17,7 @@ import {
 
 /** Converte registro ↔ domínio. Na leitura sempre via `rehydrate` (não revalida transições). */
 
+// Money.from também confere o formato do valor que vem do banco (string decimal com até 2 casas).
 const money = (amount: string, currency: string) => Money.from({ amount, currency });
 
 // ---- Wallet

@@ -1,3 +1,5 @@
+// Consumidor da fila wager-transactions.fifo: loop de long polling rodando dentro da app.
+
 import {
   ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
@@ -101,6 +103,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log({ message: 'consumer stopped' });
   }
 
+  /** Loop principal até o shutdown. Se o receive falhar (ex.: SQS fora), espera 1s e tenta de novo. */
   private async run(): Promise<void> {
     while (!this.stopping) {
       try {
@@ -129,6 +132,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
 
     const outcomes: ConsumeOutcome[] = [];
     for (const [index, message] of messages.entries()) {
+      // Uma mensagem por vez; antes de cada uma, confere se o shutdown já começou.
       if (this.stopping) {
         const notStarted = messages.slice(index);
         await this.release(queues, notStarted);
@@ -141,6 +145,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handle(queues: QueueUrls, message: Message): Promise<ConsumeOutcome> {
+    // Contagem de entregas feita pelo próprio SQS: vale entre instâncias e reinícios, por isso o backoff e a "última tentativa" usam ela.
     const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? '1');
     let outcome: ConsumeOutcome;
     let parsed: WagerMessage | undefined;
@@ -186,6 +191,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
       return this.deadLetter(queues, message, messageId, reason, error);
     }
     const lastAttempt = receiveCount >= this.config.consumer.maxReceiveCount;
+    // Erro transitório nunca grava FAILED (o banco pode estar fora); se esgotar as tentativas, a redrive policy leva a mensagem à DLQ.
     if (lastAttempt && parsed && !isTransientInfrastructureError(error)) {
       try {
         await this.processWagerTransaction.recordFailure(parsed.command);
@@ -254,6 +260,7 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
           QueueUrl: queues.wagerTransactionsDlq,
           MessageBody: message.Body ?? '',
           MessageGroupId: message.Attributes?.MessageGroupId ?? 'dead-letter',
+          // mesmo id da mensagem original: se este envio se repetir (ex.: o delete falhou), a DLQ FIFO descarta a cópia dentro da janela de deduplicação
           MessageDeduplicationId: message.MessageId,
           MessageAttributes: {
             reason: { DataType: 'String', StringValue: reason },

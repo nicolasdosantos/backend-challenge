@@ -1,3 +1,5 @@
+// payloadHash da idempotência: a mesma função para a API e para a fila, então os dois caminhos geram o mesmo hash.
+
 import { createHash } from 'node:crypto';
 import { Money, type MoneyProps } from '../domain/money';
 
@@ -22,6 +24,7 @@ export function canonicalJson(value: unknown): string {
   if (value !== null && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, v]) => v !== undefined)
+      // comparação simples de string (por code unit), não localeCompare: a ordem não depende do idioma da máquina
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`);
     return `{${entries.join(',')}}`;

@@ -1,3 +1,6 @@
+// Inbox: registro de cada mensagem SQS já processada, gravado na mesma transação SQL do processamento.
+// É o que impede uma reentrega da mesma mensagem de ser aplicada duas vezes.
+
 import { DomainError } from './errors';
 
 export interface ReceiveInboxProps {

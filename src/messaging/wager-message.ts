@@ -1,3 +1,6 @@
+// Leitura e validação da mensagem WagerTransactionRequested recebida pela fila. Qualquer erro aqui é
+// permanente (InvalidMessageError com motivo): a mensagem vai direto para a DLQ.
+
 import { InvalidRequestError } from '../application-errors';
 import type { ProcessWagerTransactionCommand } from '../wagering/process-wager-transaction';
 import { parseWagerPayload } from '../wagering/wager-payload';

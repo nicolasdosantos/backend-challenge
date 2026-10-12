@@ -1,3 +1,6 @@
+// Outbox: evento de integração esperando publicação. Entra no banco junto com a mudança de negócio
+// (mesmo commit) e só depois é enviado ao SQS pelo OutboxPublisher.
+
 import { DomainError } from './errors';
 import type { IntegrationEvent } from './integration-events';
 
@@ -30,6 +33,7 @@ export class OutboxMessage {
 
   /** O id da mensagem é o eventId, que também serve de MessageDeduplicationId no SQS. */
   static enqueue(event: IntegrationEvent<unknown>): OutboxMessage {
+    // Ida e volta pelo JSON: o payload guardado já é exatamente o corpo que vai para a fila (datas em ISO, sem undefined).
     const payload = JSON.parse(JSON.stringify(event.toJSON())) as Record<string, unknown>;
     return new OutboxMessage(event.eventId, event.aggregateId, event.eventType, payload, event.occurredAt, 0);
   }
@@ -63,6 +67,7 @@ export class OutboxMessage {
     return this._publishedAt === undefined;
   }
 
+  /** Ainda não publicado e sem tentativa agendada para depois de `now`. */
   isDue(now: Date): boolean {
     return this.isPending() && (this._nextAttemptAt === undefined || this._nextAttemptAt <= now);
   }

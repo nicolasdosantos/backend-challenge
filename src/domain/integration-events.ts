@@ -1,3 +1,6 @@
+// Eventos de integração publicados na fila wallet-events.fifo. Cada evento é uma subclasse com eventType
+// e version fixos no tipo; `data` leva dinheiro como MoneyProps (string decimal), nunca a instância de Money.
+
 import { newId } from './id';
 import type { MoneyProps } from './money';
 import type { FailureCode } from './failure-code';

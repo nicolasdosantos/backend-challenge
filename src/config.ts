@@ -1,3 +1,5 @@
+// Configuração da app a partir das variáveis de ambiente (lista completa no .env.example), com padrões para o ambiente local.
+
 export const APP_CONFIG = Symbol('APP_CONFIG');
 
 export interface AppConfig {
@@ -53,6 +55,7 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
+/** Lê o ambiente. Obs.: os números não são validados aqui; um valor que não é número vira NaN. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     port: Number(env.PORT ?? 3000),

@@ -1,8 +1,11 @@
+// Worker em segundo plano que reavalia as transações em PENDING_REFERENCE já vencidas.
+
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../config';
 import { ProcessWagerTransaction, type PendingReferenceOutcome } from './process-wager-transaction';
 
+// Pendências reavaliadas por ciclo; o que sobrar fica para os próximos ciclos.
 const BATCH_SIZE = 50;
 
 interface DueTransaction {
@@ -52,6 +55,8 @@ export class PendingReferenceWorker implements OnModuleInit, OnModuleDestroy {
       [now, BATCH_SIZE],
     );
     const outcomes: PendingReferenceOutcome[] = [];
+    // Uma transação SQL por pendência: o lock de uma wallet não segura as outras. Se uma reavaliação
+    // lançar erro, o restante do lote fica para o próximo ciclo.
     for (const row of due) {
       if (this.stopped) break;
       outcomes.push(await this.processWagerTransaction.retryPendingReference(row.id, row.wallet_id));

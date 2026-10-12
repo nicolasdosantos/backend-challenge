@@ -1,3 +1,6 @@
+// Migration inicial: cria as tabelas, constraints, índices e os triggers do ledger. Comentários `--`
+// ficam dentro do SQL; o down() desfaz tudo na ordem inversa das dependências.
+
 import { Migration } from '@mikro-orm/migrations';
 
 /**
@@ -13,12 +16,16 @@ export class Migration20261010160937_baseline extends Migration {
         id uuid primary key,
         player_id text not null,
         currency char(3) not null check (currency ~ '^[A-Z]{3}$'),
+        -- decimal exato (nunca float): até 18 dígitos inteiros e 2 casas
         balance numeric(20,2) not null,
         version integer not null,
         created_at timestamptz not null,
         updated_at timestamptz not null,
+        -- saldo nunca negativo, mesmo que o código tenha um bug
         constraint wallets_balance_non_negative check (balance >= 0),
+        -- version nasce em 1 na criação da wallet
         constraint wallets_version_positive check (version >= 1),
+        -- uma wallet por player e moeda; o CreateWallet traduz a violação em 409
         constraint wallets_player_currency_unique unique (player_id, currency),
         -- alvo da FK composta do ledger (garante que o lançamento tem a moeda da wallet)
         constraint wallets_id_currency_unique unique (id, currency)
@@ -39,6 +46,7 @@ export class Migration20261010160937_baseline extends Migration {
         amount numeric(20,2) not null,
         currency char(3) not null,
         reference_external_transaction_id text,
+        -- id interno da transação referenciada, preenchido quando a referência é resolvida
         reference_transaction_id uuid references wager_transactions (id),
         status text not null,
         failure_code text,
@@ -48,20 +56,28 @@ export class Migration20261010160937_baseline extends Migration {
         -- reprocessamento de PENDING_REFERENCE (backoff exponencial)
         reference_attempts integer not null default 0,
         next_reference_attempt_at timestamptz,
+        -- idempotência no banco: a mesma chave existe uma vez só (o INSERT ... ON CONFLICT DO NOTHING depende disso)
         constraint wager_transactions_idempotency_key_unique unique (idempotency_key),
+        -- a mesma operação do provedor não entra duas vezes, nem com outra chave; também é o índice da busca da referência
         constraint wager_transactions_provider_external_unique unique (provider_id, external_transaction_id),
+        -- kind e status só aceitam os valores dos enums do domínio
         constraint wager_transactions_kind_valid
           check (kind in ('OPENING', 'BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK')),
         constraint wager_transactions_status_valid
           check (status in ('PENDING', 'PENDING_REFERENCE', 'PROCESSED', 'REJECTED', 'FAILED')),
+        -- valor positivo; zero só em LOSS (resultado sem movimento)
         constraint wager_transactions_amount_valid
           check (amount > 0 or (kind = 'LOSS' and amount = 0)),
+        -- REFUND e ROLLBACK sempre apontam para uma operação do provedor
         constraint wager_transactions_reversal_requires_reference
           check (kind not in ('REFUND', 'ROLLBACK') or reference_external_transaction_id is not null),
+        -- OPENING e BET nunca têm referência
         constraint wager_transactions_reference_allowed
           check (kind not in ('OPENING', 'BET') or reference_external_transaction_id is null),
+        -- failure_code existe se, e só se, a transação terminou REJECTED ou FAILED
         constraint wager_transactions_failure_code_matches_status
           check ((status in ('REJECTED', 'FAILED')) = (failure_code is not null)),
+        -- processed_at marca a chegada a um estado terminal
         constraint wager_transactions_terminal_has_processed_at
           check ((status in ('PROCESSED', 'REJECTED', 'FAILED')) = (processed_at is not null)),
         constraint wager_transactions_reference_attempts_non_negative check (reference_attempts >= 0),
@@ -77,6 +93,7 @@ export class Migration20261010160937_baseline extends Migration {
         on wager_transactions (reference_transaction_id)
         where kind in ('REFUND', 'ROLLBACK') and status = 'PROCESSED';`);
     this.addSql(`
+      -- índice parcial: o worker acha as pendências vencidas sem varrer as transações já terminadas
       create index wager_transactions_pending_reference_due
         on wager_transactions (next_reference_attempt_at)
         where status = 'PENDING_REFERENCE';`);
@@ -98,11 +115,16 @@ export class Migration20261010160937_baseline extends Migration {
         created_at timestamptz not null,
         constraint wallet_ledger_entries_wallet_currency_fk
           foreign key (wallet_id, currency) references wallets (id, currency),
+        -- generated always já bloqueia valor manual (só com OVERRIDING SYSTEM VALUE); a unique deixa a regra explícita
         constraint wallet_ledger_entries_seq_unique unique (seq),
+        -- no máximo um lançamento por transação em cada wallet
         constraint wallet_ledger_entries_one_per_transaction unique (transaction_id, wallet_id),
         constraint wallet_ledger_entries_direction_valid check (direction in ('DEBIT', 'CREDIT')),
+        -- todo lançamento move dinheiro (LOSS e rejeições não geram lançamento)
         constraint wallet_ledger_entries_amount_positive check (amount > 0),
+        -- nenhum lançamento registra saldo negativo
         constraint wallet_ledger_entries_balances_non_negative check (balance_before >= 0 and balance_after >= 0),
+        -- aritmética conferida pelo banco: balance_after = balance_before ± amount
         constraint wallet_ledger_entries_balanced check (
           (direction = 'CREDIT' and balance_after = balance_before + amount)
           or (direction = 'DEBIT' and balance_after = balance_before - amount)
@@ -125,6 +147,7 @@ export class Migration20261010160937_baseline extends Migration {
         before update or delete on wallet_ledger_entries
         for each row execute function wallet_ledger_entries_append_only();`);
     this.addSql(`
+      -- TRUNCATE não dispara trigger de linha; por isso este trigger separado, por statement
       create trigger wallet_ledger_entries_no_truncate
         before truncate on wallet_ledger_entries
         for each statement execute function wallet_ledger_entries_append_only();`);
@@ -136,6 +159,7 @@ export class Migration20261010160937_baseline extends Migration {
         payload_hash text not null,
         received_at timestamptz not null,
         processed_at timestamptz,
+        -- a PK é a deduplicação: numa reentrega, o INSERT ... ON CONFLICT DO NOTHING não devolve linha
         primary key (consumer_name, message_id)
       );`);
 
@@ -148,9 +172,11 @@ export class Migration20261010160937_baseline extends Migration {
         occurred_at timestamptz not null,
         attempts integer not null default 0 check (attempts >= 0),
         next_attempt_at timestamptz,
+        -- null = ainda não publicado
         published_at timestamptz
       );`);
     this.addSql(`
+      -- índice parcial só com os pendentes: o publicador e o gauge de outbox lag não leem os já publicados
       create index outbox_messages_pending
         on outbox_messages (occurred_at)
         where published_at is null;`);
@@ -160,6 +186,7 @@ export class Migration20261010160937_baseline extends Migration {
     this.addSql(`drop table if exists outbox_messages;`);
     this.addSql(`drop table if exists inbox_messages;`);
     this.addSql(`drop table if exists wallet_ledger_entries;`);
+    // o drop da tabela já remove os triggers; a função é removida à parte
     this.addSql(`drop function if exists wallet_ledger_entries_append_only();`);
     this.addSql(`drop table if exists wager_transactions;`);
     this.addSql(`drop table if exists wallets;`);

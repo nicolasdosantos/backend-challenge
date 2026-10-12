@@ -1,3 +1,6 @@
+// Classificação de falhas de infraestrutura: decide se vale tentar de novo (HTTP 503 na API, retry com
+// backoff no consumidor) ou se o erro não é passageiro.
+
 import { ConnectionException, DeadlockException, LockWaitTimeoutException } from '@mikro-orm/core';
 
 /** Códigos de erro de rede (Node) e SQLSTATE do PostgreSQL que indicam indisponibilidade passageira. */

@@ -1,3 +1,5 @@
+// Consultas de leitura de transações. Ficam fora do caminho de escrita: não travam nada.
+
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Injectable } from '@nestjs/common';
 import { TransactionNotFoundError } from '../application-errors';
@@ -32,6 +34,7 @@ export interface WagerTransactionView {
 export class TransactionQueries {
   constructor(private readonly orm: MikroORM) {}
 
+  /** Pelo id interno. Um id que não é UUID responde 404 sem consultar o banco. */
   async byId(transactionId: string): Promise<WagerTransactionView> {
     const record = isUuid(transactionId)
       ? await this.orm.em.fork().findOne(WagerTransactionRecord, { id: transactionId })
@@ -39,6 +42,7 @@ export class TransactionQueries {
     return this.toView(record, transactionId);
   }
 
+  /** Pelo id do provedor: é como o provedor consulta uma operação sem conhecer o nosso id. */
   async byExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransactionView> {
     const record = await this.orm.em.fork().findOne(WagerTransactionRecord, { providerId, externalTransactionId });
     return this.toView(record, `${providerId}/${externalTransactionId}`);

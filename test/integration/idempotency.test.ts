@@ -1,3 +1,6 @@
+// Idempotência no banco: mesma chave com payload diferente (em sequência e em paralelo), mesma chave em
+// wallets diferentes (que não dividem lock) e o mesmo id do provedor com outra chave.
+
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { IdempotencyKeyConflictError } from '../../src/application-errors';
@@ -66,6 +69,7 @@ describe('mesma chave com payload diferente (#3)', () => {
   test('paralelo: A e B disputando a mesma chave → um processa, o outro recebe 409', async () => {
     const w = await wallet('100.00');
     const a = wagerCommand(w, { money: brl('10.00') });
+    // Mesma wallet: o lock serializa as duas; a segunda encontra a chave da primeira com outro hash e recebe 409.
     const b = { ...a, money: brl('20.00') };
 
     const responses = await Promise.all([submitTransaction(t.baseUrl, a), submitTransaction(t.baseUrl, b)]);

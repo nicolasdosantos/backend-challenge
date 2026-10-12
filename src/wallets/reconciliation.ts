@@ -1,3 +1,5 @@
+// Reconciliação de uma wallet: compara o saldo gravado com o saldo reconstruído a partir do ledger.
+
 import { MikroORM } from '@mikro-orm/postgresql';
 import { Injectable, Logger } from '@nestjs/common';
 import { WalletNotFoundError } from '../application-errors';

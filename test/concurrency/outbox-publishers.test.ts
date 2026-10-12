@@ -1,3 +1,6 @@
+// Dois publicadores sobre a mesma outbox, com PostgreSQL e SQS reais: o SKIP LOCKED precisa dividir
+// o trabalho entre eles sem que nenhum evento seja enviado duas vezes.
+
 import { MikroORM } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { APP_CONFIG, type AppConfig } from '../../src/config';

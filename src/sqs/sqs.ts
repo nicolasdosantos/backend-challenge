@@ -1,3 +1,5 @@
+// Cliente SQS e criação/resolução das três filas FIFO usadas pela app.
+
 import {
   CreateQueueCommand,
   GetQueueUrlCommand,
@@ -13,6 +15,7 @@ export const QUEUE_NAMES = {
   walletEvents: 'wallet-events.fifo',
 } as const;
 
+// Precisa ser igual a SQS_CONSUMER_MAX_RECEIVE_COUNT: é por esse número que o consumidor reconhece a última tentativa.
 /** Receives antes de a mensagem ir para a DLQ via redrive policy. */
 export const MAX_RECEIVE_COUNT = 5;
 
@@ -64,6 +67,7 @@ export async function ensureQueues(
   prefix = '',
   maxReceiveCount = MAX_RECEIVE_COUNT,
 ): Promise<QueueUrls> {
+  // A DLQ é criada primeiro porque a redrive policy da fila principal precisa do ARN dela.
   const wagerTransactionsDlq = await createFifoQueue(client, prefix + QUEUE_NAMES.wagerTransactionsDlq);
   const dlqAttributes = await client.send(
     new GetQueueAttributesCommand({ QueueUrl: wagerTransactionsDlq, AttributeNames: ['QueueArn'] }),

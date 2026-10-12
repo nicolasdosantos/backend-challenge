@@ -1,3 +1,6 @@
+// Caso de uso chamado direto (sem HTTP): efeito de BET, WIN e LOSS, rejeições gravadas com commit,
+// entradas inválidas, replay pela chave e atomicidade de tudo o que é escrito.
+
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { WalletNotFoundError } from '../../src/application-errors';

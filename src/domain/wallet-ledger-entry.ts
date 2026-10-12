@@ -1,3 +1,6 @@
+// Lançamento do ledger: o registro de uma movimentação de saldo. Não muda depois de criado, nem no
+// código (sem setters, objeto congelado) nem no banco (trigger que recusa UPDATE/DELETE/TRUNCATE).
+
 import { InvalidLedgerEntryError } from './errors';
 import { newId } from './id';
 import { Money } from './money';
@@ -37,6 +40,7 @@ export class WalletLedgerEntry {
   }
 
   static create(props: CreateLedgerEntryProps): WalletLedgerEntry {
+    // Monta a instância primeiro para reaproveitar isBalanced(); se alguma regra falhar, o throw a descarta.
     const entry = WalletLedgerEntry.rehydrate({ ...props, id: newId() });
     if (!props.money.isPositive()) {
       throw new InvalidLedgerEntryError('Ledger entry amount must be positive');

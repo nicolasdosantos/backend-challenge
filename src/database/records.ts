@@ -1,3 +1,5 @@
+// Mapeamento das tabelas com EntitySchema (sem decorators), para o domínio não depender do ORM.
+
 import { EntitySchema } from '@mikro-orm/core';
 
 /**

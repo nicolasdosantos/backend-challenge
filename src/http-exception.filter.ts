@@ -1,3 +1,6 @@
+// Filtro global de exceções: traduz erros de domínio, de aplicação e de infraestrutura para status HTTP,
+// sempre com o mesmo corpo ({ code, message, retryable }).
+
 import { Catch, HttpException, HttpStatus, Logger, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
 import {
   DuplicateExternalTransactionError,
@@ -54,6 +57,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const message = error instanceof Error ? error.message : 'Unexpected error';
     const fail = (status: number, code: string, retryable = false): [number, ErrorBody] => [status, { code, message, retryable }];
 
+    // A ordem importa: primeiro os erros conhecidos, depois as falhas passageiras (503); o que sobrar vira 500 genérico, sem detalhe interno na resposta.
     if (error instanceof InvalidRequestError || error instanceof DomainError) return fail(400, 'INVALID_PAYLOAD');
     if (error instanceof WalletNotFoundError) return fail(404, 'WALLET_NOT_FOUND');
     if (error instanceof TransactionNotFoundError) return fail(404, 'TRANSACTION_NOT_FOUND');

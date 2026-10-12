@@ -1,7 +1,12 @@
+// Value object de dinheiro: valor decimal exato (decimal.js, nunca number), escala fixa de 2 casas
+// e moeda ISO-4217. É imutável: toda operação devolve uma nova instância.
+
 import DecimalJs from 'decimal.js';
 import { CurrencyMismatchError, InvalidMoneyError } from './errors';
 
 // Instância própria do decimal.js para não depender de configuração global.
+// Só somamos e subtraímos valores que já têm no máximo 2 casas, então na prática nada é arredondado;
+// a precisão e o modo de arredondamento ficam fixos aqui só para não depender do padrão da biblioteca.
 const Decimal = DecimalJs.clone({ precision: 40, rounding: DecimalJs.ROUND_HALF_EVEN });
 type Decimal = InstanceType<typeof Decimal>;
 
@@ -32,6 +37,7 @@ export class Money {
     return new Money(new Decimal(props.amount), Money.validCurrency(props.currency));
   }
 
+  /** Zero na moeda informada (ex.: saldo antes do lançamento de abertura). */
   static zero(currency: string): Money {
     return new Money(new Decimal(0), Money.validCurrency(currency));
   }
@@ -43,6 +49,7 @@ export class Money {
     return currency;
   }
 
+  /** Sempre com 2 casas ("25" vira "25.00"): é o formato dos contratos e do banco. */
   get amount(): string {
     return this.value.toFixed(SCALE);
   }
@@ -78,6 +85,7 @@ export class Money {
     return this.value.lessThan(other.value);
   }
 
+  /** Não lança erro com moedas diferentes: só responde false. */
   equals(other: Money): boolean {
     return this.currency === other.currency && this.value.equals(other.value);
   }

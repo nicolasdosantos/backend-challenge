@@ -1,3 +1,5 @@
+// Métricas Prometheus da aplicação (expostas em GET /metrics).
+
 import { Injectable } from '@nestjs/common';
 import { Counter, Gauge, Histogram, Registry } from 'prom-client';
 

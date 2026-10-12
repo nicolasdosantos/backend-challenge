@@ -1,3 +1,6 @@
+// Configuração do MikroORM (PostgreSQL): entidades, pool, timeouts do driver `pg` e migrations.
+// Usada pela app (AppModule) e pelo CLI do MikroORM (export default no fim do arquivo).
+
 import { Migrator } from '@mikro-orm/migrations';
 import { defineConfig, type Options } from '@mikro-orm/postgresql';
 import { join } from 'node:path';
@@ -25,6 +28,7 @@ export function createOrmConfig(databaseUrl: string, options: DatabaseOptions = 
     migrations: {
       path: join(import.meta.dir, 'migrations'),
       pathTs: join(import.meta.dir, 'migrations'),
+      // cada migration roda em transação; com allOrNothing, as pendentes entram todas juntas ou nenhuma
       transactional: true,
       allOrNothing: true,
       snapshot: false,

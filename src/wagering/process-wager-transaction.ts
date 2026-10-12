@@ -1,3 +1,6 @@
+// Caso de uso central: processa uma transação de aposta vinda da API ou da fila e reprocessa as que
+// ficaram esperando a referência. Cada operação é uma transação SQL com a linha da wallet travada.
+
 import { LockMode } from '@mikro-orm/core';
 import { MikroORM, type EntityManager } from '@mikro-orm/postgresql';
 import { Inject, Injectable, Logger } from '@nestjs/common';
@@ -121,6 +124,7 @@ export class ProcessWagerTransaction {
       money: Money.from(command.money),
       payloadHash: computePayloadHash(command),
     });
+    // Um id que não é UUID não pode existir: responde "wallet não encontrada" sem mandar ao banco um valor que a coluna uuid recusaria.
     if (!isUuid(command.walletId)) {
       throw new WalletNotFoundError(command.walletId);
     }
@@ -144,6 +148,7 @@ export class ProcessWagerTransaction {
 
       // 3. Decide em memória: só leituras (referência), nenhuma escrita ainda.
       const wallet = walletToDomain(walletRecord);
+      // Um único instante para o processamento, o lançamento e os eventos desta operação.
       const at = new Date();
       const evaluation = await this.evaluate(em, wallet, transaction, at);
       if (evaluation.pending) {
@@ -168,6 +173,7 @@ export class ProcessWagerTransaction {
       return this.toResult(transaction, wallet.balance, false);
     });
 
+    // A latência medida inclui a espera pelo lock da wallet.
     stopTimer();
     if (result === DUPLICATE_DELIVERY) {
       this.metrics.duplicates.inc({ type: 'inbox' });
@@ -213,6 +219,7 @@ export class ProcessWagerTransaction {
     });
     transaction.fail(FailureCode.InternalError, new Date());
     const recorded = await this.orm.em.fork().transactional(async (em) => {
+      // Sem lock da wallet: aqui não muda saldo. O INSERT ... ON CONFLICT ainda impede gravar por cima de uma transação com a mesma chave.
       const wallet = await em.findOne(WalletRecord, { id: command.walletId });
       return wallet !== null && (await this.insertTransaction(em, transaction));
     });
@@ -338,6 +345,7 @@ export class ProcessWagerTransaction {
    * transação já segura o lock; nesse caso conta um conflito e espera com FOR UPDATE normal.
    */
   private async lockWallet(em: EntityManager, walletId: string): Promise<WalletRecord> {
+    // PESSIMISTIC_PARTIAL_WRITE vira `FOR UPDATE SKIP LOCKED` no PostgreSQL; PESSIMISTIC_WRITE, `FOR UPDATE`.
     const free = await em.findOne(WalletRecord, { id: walletId }, { lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE });
     if (free) {
       return free;
@@ -360,6 +368,7 @@ export class ProcessWagerTransaction {
       transaction.reject(code, at, wallet.balance);
       return { pending: false };
     };
+    // A ordem das checagens decide qual failureCode sai quando a transação tem mais de um problema.
     if (transaction.playerId !== wallet.playerId) {
       return reject(FailureCode.PlayerMismatch);
     }

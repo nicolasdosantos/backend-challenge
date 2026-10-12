@@ -1,3 +1,6 @@
+// Referências: operações que chegam antes da referenciada (PENDING_REFERENCE + worker), o efeito de cada
+// reversão, as validações da referência e a regra de uma reversão por transação.
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { newId } from '../../src/domain/id';
 import { PendingReferenceWorker } from '../../src/wagering/pending-reference.worker';
